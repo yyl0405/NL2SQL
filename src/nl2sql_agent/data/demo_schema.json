@@ -1,0 +1,166 @@
+{
+  "domain": "离散制造 ERP（订单 / 库存 / 采购 / 工单 / BOM）",
+  "dialect": "sqlite",
+  "as_of_date": "2026-07-01",
+  "business_rules": [
+    "销售额 = order_item.qty * order_item.unit_price * (1 - order_item.discount)",
+    "可用库存 = inventory.on_hand_qty - inventory.locked_qty",
+    "在途采购 = purchase_order.status = 'in_transit'",
+    "逾期未发货 = sales_order.status = 'pending' 且 due_date 早于基准日期",
+    "BOM 总用量 = 从父件到子件的 qty_per_parent 递归相乘",
+    "齐套率 = min(1, (可用库存 + 在途采购) / 需求数量)",
+    "金额保留 2 位小数，比率保留 4 位小数"
+  ],
+  "tables": [
+    {
+      "name": "sales_order",
+      "description": "销售订单主表，一行一个客户订单，包含区域、交期和订单状态",
+      "synonyms": ["订单", "销售订单", "客户订单", "合同"],
+      "primary_key": "order_id",
+      "columns": [
+        {"name": "order_id", "type": "TEXT", "description": "订单编号，如 ORD-1001", "synonyms": ["订单号", "单号"]},
+        {"name": "customer_id", "type": "TEXT", "description": "客户编号", "synonyms": ["客户ID"]},
+        {"name": "customer_name", "type": "TEXT", "description": "客户名称", "synonyms": ["客户", "公司"]},
+        {"name": "region", "type": "TEXT", "description": "客户所属销售区域：华东 / 华南 / 华北", "synonyms": ["地区", "区域", "大区"]},
+        {"name": "order_date", "type": "TEXT", "description": "下单日期，格式 YYYY-MM-DD", "synonyms": ["订单日期", "下单时间"]},
+        {"name": "due_date", "type": "TEXT", "description": "约定交货日期，格式 YYYY-MM-DD", "synonyms": ["交期", "交付日期"]},
+        {"name": "status", "type": "TEXT", "description": "订单状态：pending 待发货 / shipped 已发货 / closed 已结案", "synonyms": ["订单状态"]},
+        {"name": "sales_rep", "type": "TEXT", "description": "销售负责人", "synonyms": ["销售员", "业务员"]},
+        {"name": "customer_phone", "type": "TEXT", "description": "客户联系电话（敏感字段，默认禁止查询）", "sensitive": true},
+        {"name": "internal_note", "type": "TEXT", "description": "内部备注（已禁用，不允许查询）", "disabled": true}
+      ]
+    },
+    {
+      "name": "order_item",
+      "description": "销售订单明细表，一行一个物料行，包含数量、单价和折扣",
+      "synonyms": ["订单明细", "订单行", "销售明细"],
+      "primary_key": "order_id, material_id",
+      "columns": [
+        {"name": "order_id", "type": "TEXT", "description": "订单编号，关联 sales_order.order_id", "synonyms": ["订单号"]},
+        {"name": "material_id", "type": "TEXT", "description": "物料编号，关联 material.material_id", "synonyms": ["物料", "产品"]},
+        {"name": "qty", "type": "INTEGER", "description": "订单数量", "synonyms": ["数量", "台数"]},
+        {"name": "unit_price", "type": "REAL", "description": "含税单价", "synonyms": ["单价", "价格"]},
+        {"name": "discount", "type": "REAL", "description": "折扣率，0.05 表示 5% 折扣", "synonyms": ["折扣", "折让"]}
+      ]
+    },
+    {
+      "name": "material",
+      "description": "物料主数据，包含成品、半成品和原材料，记录分类、单位和安全库存",
+      "synonyms": ["物料", "物料主数据", "产品", "零件"],
+      "primary_key": "material_id",
+      "columns": [
+        {"name": "material_id", "type": "TEXT", "description": "物料编号，如 M001 / FG001", "synonyms": ["物料号", "料号"]},
+        {"name": "material_name", "type": "TEXT", "description": "物料名称", "synonyms": ["物料名称", "品名"]},
+        {"name": "category", "type": "TEXT", "description": "物料分类：成品 / 电气件 / 机械件 / 结构件", "synonyms": ["分类", "物料分类"]},
+        {"name": "unit", "type": "TEXT", "description": "计量单位：台 / 个 / 根 / 米 / 套", "synonyms": ["单位"]},
+        {"name": "safety_stock", "type": "INTEGER", "description": "安全库存阈值", "synonyms": ["安全库存"]},
+        {"name": "standard_cost", "type": "REAL", "description": "标准成本，用于库存金额估算", "synonyms": ["标准成本", "成本"]}
+      ]
+    },
+    {
+      "name": "inventory",
+      "description": "库存快照表，按物料和仓库记录现有量与锁定量",
+      "synonyms": ["库存", "仓库库存", "现存量"],
+      "primary_key": "material_id, warehouse",
+      "columns": [
+        {"name": "material_id", "type": "TEXT", "description": "物料编号，关联 material.material_id", "synonyms": ["物料"]},
+        {"name": "warehouse", "type": "TEXT", "description": "仓库编码，如 WH-A / WH-B", "synonyms": ["仓库"]},
+        {"name": "on_hand_qty", "type": "INTEGER", "description": "现有库存数量", "synonyms": ["现存量", "库存量"]},
+        {"name": "locked_qty", "type": "INTEGER", "description": "已被订单或工单锁定的数量", "synonyms": ["锁定库存", "锁定量"]}
+      ]
+    },
+    {
+      "name": "purchase_order",
+      "description": "采购订单表，记录供应商、采购数量、预计到货日期和状态",
+      "synonyms": ["采购单", "采购订单", "在途", "供应商"],
+      "primary_key": "po_id",
+      "columns": [
+        {"name": "po_id", "type": "TEXT", "description": "采购订单编号", "synonyms": ["采购单号"]},
+        {"name": "material_id", "type": "TEXT", "description": "采购物料编号，关联 material.material_id", "synonyms": ["物料"]},
+        {"name": "supplier_name", "type": "TEXT", "description": "供应商名称", "synonyms": ["供应商"]},
+        {"name": "qty", "type": "INTEGER", "description": "采购数量", "synonyms": ["数量"]},
+        {"name": "expected_date", "type": "TEXT", "description": "预计到货日期，格式 YYYY-MM-DD", "synonyms": ["预计到货", "到货日期"]},
+        {"name": "status", "type": "TEXT", "description": "采购状态：in_transit 在途 / received 已到货 / closed 已关闭", "synonyms": ["采购状态"]}
+      ]
+    },
+    {
+      "name": "work_order",
+      "description": "生产工单表，记录计划产量、完工产量和计划起止日期",
+      "synonyms": ["工单", "生产工单", "生产订单"],
+      "primary_key": "wo_id",
+      "columns": [
+        {"name": "wo_id", "type": "TEXT", "description": "工单编号", "synonyms": ["工单号"]},
+        {"name": "order_id", "type": "TEXT", "description": "关联销售订单编号", "synonyms": ["销售订单"]},
+        {"name": "material_id", "type": "TEXT", "description": "生产的物料编号", "synonyms": ["物料"]},
+        {"name": "planned_qty", "type": "INTEGER", "description": "计划生产数量", "synonyms": ["计划数量", "计划产量"]},
+        {"name": "completed_qty", "type": "INTEGER", "description": "已完工数量", "synonyms": ["完工数量", "实际产量"]},
+        {"name": "planned_start", "type": "TEXT", "description": "计划开工日期", "synonyms": ["计划开工"]},
+        {"name": "planned_end", "type": "TEXT", "description": "计划完工日期", "synonyms": ["计划完工"]},
+        {"name": "status", "type": "TEXT", "description": "工单状态：pending / in_progress / completed", "synonyms": ["工单状态"]}
+      ]
+    },
+    {
+      "name": "shipment",
+      "description": "发货记录表，一行一次发货，支持一单多次发货",
+      "synonyms": ["发货", "出货", "发运"],
+      "primary_key": "shipment_id",
+      "columns": [
+        {"name": "shipment_id", "type": "TEXT", "description": "发货单编号", "synonyms": ["发货单号"]},
+        {"name": "order_id", "type": "TEXT", "description": "关联销售订单编号", "synonyms": ["销售订单"]},
+        {"name": "shipped_qty", "type": "INTEGER", "description": "本次发货数量", "synonyms": ["发货数量"]},
+        {"name": "ship_date", "type": "TEXT", "description": "发货日期", "synonyms": ["发货日期"]}
+      ]
+    },
+    {
+      "name": "bom",
+      "description": "物料清单（BOM），一行表示父件生产一个单位需要多少子件",
+      "synonyms": ["BOM", "物料清单", "子件", "用料"],
+      "primary_key": "parent_material_id, child_material_id",
+      "columns": [
+        {"name": "parent_material_id", "type": "TEXT", "description": "父件物料编号", "synonyms": ["父件", "上阶物料"]},
+        {"name": "child_material_id", "type": "TEXT", "description": "子件物料编号", "synonyms": ["子件", "下阶物料"]},
+        {"name": "qty_per_parent", "type": "REAL", "description": "生产一个父件需要的子件数量", "synonyms": ["单台用量", "单位用量"]}
+      ]
+    },
+    {
+      "name": "dim_lookup",
+      "description": "通用维度表，按 lookup_type 区分不同字典；查询时必须限定 lookup_type",
+      "synonyms": ["维度", "字典", "基础数据"],
+      "primary_key": "lookup_type, lookup_code",
+      "required_filters": [
+        {
+          "column": "lookup_type",
+          "value": "material_category",
+          "reason": "维度表混存多种字典，不限定 lookup_type 会串数据"
+        }
+      ],
+      "columns": [
+        {"name": "lookup_type", "type": "TEXT", "description": "字典类型，如 material_category", "synonyms": ["字典类型"]},
+        {"name": "lookup_code", "type": "TEXT", "description": "字典编码", "synonyms": ["编码"]},
+        {"name": "lookup_name", "type": "TEXT", "description": "字典显示名称", "synonyms": ["名称"]}
+      ]
+    },
+    {
+      "name": "internal_audit",
+      "description": "内部审计日志（默认禁用，不允许业务查询）",
+      "synonyms": ["审计", "日志"],
+      "primary_key": "audit_id",
+      "disabled": true,
+      "columns": [
+        {"name": "audit_id", "type": "TEXT", "description": "审计记录编号"},
+        {"name": "action", "type": "TEXT", "description": "操作类型"},
+        {"name": "created_at", "type": "TEXT", "description": "操作时间"}
+      ]
+    }
+  ],
+  "relationships": [
+    {"left": "sales_order.order_id", "right": "order_item.order_id", "type": "1:N"},
+    {"left": "sales_order.order_id", "right": "work_order.order_id", "type": "1:N"},
+    {"left": "sales_order.order_id", "right": "shipment.order_id", "type": "1:N"},
+    {"left": "material.material_id", "right": "order_item.material_id", "type": "1:N"},
+    {"left": "material.material_id", "right": "inventory.material_id", "type": "1:N"},
+    {"left": "material.material_id", "right": "purchase_order.material_id", "type": "1:N"},
+    {"left": "material.material_id", "right": "bom.parent_material_id", "type": "1:N"},
+    {"left": "material.material_id", "right": "bom.child_material_id", "type": "1:N"}
+  ]
+}

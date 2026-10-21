@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Unit and integration tests
+        run: python -m pytest -q
+
+      - name: Offline agent evaluation
+        run: python -m nl2sql_agent.cli eval --home . --report-dir reports
+
+      - name: Upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-py${{ matrix.python-version }}
+          path: reports/
+          if-no-files-found: ignore

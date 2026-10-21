@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nl2sql-agent"
+version = "0.1.0"
+description = "A tool-calling NL2SQL agent for manufacturing ERP analytics, with schema linking, SQL guardrails, deterministic repair and verified experience memory."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Yanglong Yu" }]
+keywords = ["nl2sql", "text-to-sql", "agent", "tool-calling", "erp", "manufacturing"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["openai>=1.40.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+nl2sql-agent = "nl2sql_agent.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+nl2sql_agent = ["data/*.json", "data/*.jsonl"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
