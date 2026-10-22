@@ -21,3 +21,6 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+# Internal working plan (progress log with per-phase gaps); not published
+docs/IMPLEMENTATION_PLAN.md

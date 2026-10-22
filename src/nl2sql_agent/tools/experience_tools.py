@@ -6,6 +6,7 @@ from typing import Any
 
 from ..guard import SQLGuard
 from ..memory import ExperienceStore
+from ..taxonomy import classify_category
 from .base import Tool, ToolError, ToolSpec, string_param
 
 
@@ -13,15 +14,20 @@ def build_experience_tools(
     store: ExperienceStore,
     schema_hash: str,
     guard: SQLGuard,
+    category_boost: float = 0.12,
 ) -> list[Tool]:
     def search_experience(question: str, top_k: int = 3) -> dict[str, Any]:
+        category = classify_category(str(question or ""))
         examples = store.search(
             str(question or ""),
             schema_hash=schema_hash,
             top_k=max(1, min(10, int(top_k))),
+            category=category,
+            category_boost=category_boost,
         )
         return {
             "count": len(examples),
+            "category": category,
             "examples": examples,
             "note": "只返回人工验证过的经验；候选经验不会进入提示词",
         }
@@ -38,7 +44,7 @@ def build_experience_tools(
         record = store.add(
             question,
             check.sql,
-            category=str(category or ""),
+            category=str(category or "").strip() or classify_category(question),
             source="agent",
             verified=False,
             schema_hash=schema_hash,

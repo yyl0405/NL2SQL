@@ -4,7 +4,7 @@
 
 > 这不是一个“把 schema 拼进 prompt，然后让模型直接吐 SQL”的 demo。项目把问数拆成 **schema linking → 经验召回 → SQL 生成 → 护栏校验 → 只读执行 → 错误修复 → 结果验证** 的 Agent 循环，模型通过 8 个工具与环境交互。
 
-[架构设计](docs/ARCHITECTURE.md) · [工具调用协议](docs/TOOL_CALLING.md) · [继续改进路线](docs/IMPROVEMENTS.md) · [从生产链路提取说明](docs/EXTRACTION.md)
+[架构设计](docs/ARCHITECTURE.md) · [工具调用协议](docs/TOOL_CALLING.md) · [继续改进路线](docs/IMPROVEMENTS.md) · [从生产链路提取说明](docs/EXTRACTION.md) · [变更与评测记录](CHANGELOG.md)
 
 ---
 
@@ -30,8 +30,9 @@
 - **离线可复现**：内置规则模型 `mock`，无 API Key 也能跑通完整 Agent 循环、demo 和 CI。
 - **安全护栏**：只读语句、单语句、表白名单、禁用表/字段、敏感字段、必填维度过滤、列存在性、禁止 `SELECT *`。
 - **确定性修复**：清理尾逗号/分号、移除报错投影列、SQL Server 8120 的 `GROUP BY` 算术表达式包裹；修复规则可回退，不引入新表/新字段。
-- **经验记忆**：SQLite 持久化，schema hash 失效隔离，相似度召回，命中计数；候选经验永不进入提示词。
-- **评测闭环**：16 条冻结用例（15 可回答 + 1 拒答），输出 JSON + Markdown 报告。
+- **经验记忆闭环**：SQLite 持久化，schema hash 失效隔离，相似度 + 类别加权召回，命中计数；候选经验永不进入提示词。已验证经验在每轮运行前**自动注入** system prompt（默认 3 条 / 1200 字符预算），终态失败自动进入 `failure_queue` 去重排队，人工 `experience resolve` 结案必须通过护栏与真实执行，结案产物直接回流为 verified 经验。
+- **评测闭环**：40 条冻结用例（37 可回答 + 3 拒答），按类别聚合，输出 JSON + Markdown 报告，含执行准确率、table recall@5、token 计量与运行元数据（provider / model / prompt_version / git_sha）。
+- **AI 辅助评审（可选）**：`eval --judge` 用 LLM-as-judge 评 SQL 语义等价、回答忠实度与拒答合理性；结构化 JSON + 枚举校验 + unknown 降级 + SQLite 缓存 + 抽样/仅失败评审，`--calibrate` 在 20 条人工标注集上算一致率与 Cohen's kappa。**AI 评审只是辅助信号，绝不替代确定性结果比对**。
 - **合成数据**：仓库内的 ERP schema 与数据全部虚构，不含任何公司真实表结构、客户数据或凭证。
 
 ---
@@ -144,6 +145,22 @@ nl2sql-agent ask "上个月各区域的销售额排名" --verbose
 | `NL2SQL_DISABLE_THINKING` | `true` | 发送 `enable_thinking=false`；端点不支持该字段时设为 `false` |
 | `NL2SQL_ALLOW_SENSITIVE` | `false` | 是否允许敏感字段（默认禁止） |
 | `NL2SQL_DEMO_TODAY` | `2026-07-01` | 演示库基准日期 |
+| `NL2SQL_JUDGE_ENABLED` | `false` | 是否在 `eval` 中默认启用 AI Judge |
+| `NL2SQL_JUDGE_PROVIDER` | `openai` | 评审提供方（当前仅 `openai`） |
+| `NL2SQL_JUDGE_MODEL` | `qwen-max` | 评审模型，建议与生成模型不同 |
+| `NL2SQL_JUDGE_BASE_URL` | 复用主配置 | OpenAI 兼容端点 |
+| `NL2SQL_JUDGE_API_KEY` | 复用主 Key | 建议独立 Key，只放 `.env` |
+| `NL2SQL_JUDGE_MAX_TOKENS` | `800` | 单次评审输出上限 |
+| `NL2SQL_JUDGE_MAX_ROWS` | `20` | 结果集截断行数 |
+| `NL2SQL_JUDGE_CACHE_PATH` | `var/judge_cache.sqlite` | 评审缓存路径 |
+| `NL2SQL_JUDGE_PROMPT_VERSION` | `judge-v2` | 评审 Prompt 版本 |
+| `NL2SQL_JUDGE_MAX_CALLS` | `100` | 单次 `eval` 评审调用上限 |
+| `NL2SQL_FEWSHOT_ENABLED` | `true` | 是否把 verified 经验自动注入 system prompt |
+| `NL2SQL_FEWSHOT_MAX` | `3` | 自动注入的经验条数上限 |
+| `NL2SQL_FEWSHOT_MAX_CHARS` | `1200` | 注入块字符预算（按整条丢弃，不截断 SQL） |
+| `NL2SQL_CAPTURE_FAILURES` | `true` | 终态失败（`needs_human/failed/max_steps`）是否自动入队 |
+| `NL2SQL_MAX_REPAIRS` | `2` | 单题 `repair_sql` 轮次硬上限，超限直接转人工 |
+| `NL2SQL_CATEGORY_BOOST` | `0.12` | 同类别 verified 经验的召回加分（`0` 关闭） |
 
 ---
 
@@ -157,7 +174,7 @@ nl2sql-agent ask "上个月各区域的销售额排名" --verbose
 | `validate_sql` | 执行前安全与权限校验 | 6 类 error，全部阻断执行 |
 | `execute_sql` | 只读执行并返回列/行/耗时/截断标记 | 先过 guard；行数、超时双限制 |
 | `repair_sql` | 基于数据库错误的确定性修复 | 只做低风险、可回退修复；不新增表/字段 |
-| `search_experience` | 召回人工验证过的相似问法/SQL | 只查 `verified` + 同 schema hash |
+| `search_experience` | 召回人工验证过的相似问法/SQL | 只查 `verified` + 同 schema hash；同类别加分 |
 | `save_experience` | 保存成功问法为候选经验 | 必须通过 guard；永远只写 `candidate` |
 
 完整 JSON Schema 与一次真实调用轨迹见 [docs/TOOL_CALLING.md](docs/TOOL_CALLING.md)。
@@ -202,21 +219,53 @@ sql: SELECT ROUND(SUM(oi.qty * oi.unit_price * (1 - oi.discount)), 2) AS total_a
 nl2sql-agent eval
 ```
 
-内置 16 条冻结用例覆盖：指标聚合、分组排名、时间过滤、库存、采购、工单、BOM 递归、齐套、明细查询与拒答。
+内置 40 条冻结用例覆盖：指标聚合、分组排名、时间过滤、库存、采购、工单、BOM 递归、齐套、明细查询与拒答。
 
 最近一次离线基线（`provider=mock`，合成库）：
 
 | 指标 | 结果 |
 |---|---|
-| 用例通过 | **16 / 16** |
+| 用例通过 | **40 / 40** |
 | Execution accuracy | **100%** |
 | Valid SQL rate | **100%** |
 | Execution success rate | **100%** |
 | Refusal accuracy | **100%** |
-| 平均 Agent 步数 | 5.88 |
-| 平均端到端耗时 | 约 3–6 ms（mock） |
+| Table recall@5 | **96%**（BM25 表级召回，真实检索结果实测） |
+| 平均 Agent 步数 | 5.8 |
+| 平均端到端耗时 | 约 2 ms（mock） |
+| Token | 0（mock 无用量；接 `openai` 后自动累计） |
 
 > 这些数字验证的是 **Agent 编排、护栏、修复与评测链路**：`mock` 是确定性规则基线，不代表真实大模型的问数准确率。接入 `openai` 后请重新跑同一评测集，报告会记录 provider。
+
+### AI 辅助评审（可选）
+
+确定性结果比对始终是主指标。AI Judge 只在其之上补充语义信号，需配置 `NL2SQL_JUDGE_API_KEY`（或复用 `NL2SQL_API_KEY`）后启用：
+
+```bash
+# 全量评审
+nl2sql-agent eval --judge
+
+# 仅评审确定性失败的用例
+nl2sql-agent eval --judge --judge-on-fail
+
+# 固定种子抽样 10 条
+nl2sql-agent eval --judge --judge-sample 10
+
+# 在 20 条人工标注集上校准，计算一致率与 Cohen's kappa
+nl2sql-agent eval --calibrate
+
+# 与历史基线报告对比指标增量
+nl2sql-agent eval --compare reports/eval_YYYYmmdd_HHMMSS.json
+```
+
+无 Key 时 `--judge` / `--calibrate` 会给出清晰配置提示并以退出码 `2` 结束，不影响默认确定性评测。CI 只跑离线 `mock` 评测，不调用任何真实大模型。
+
+用本地 Key 实测（`qwen-max` 评审 `mock` 生成，合成库）后：
+
+- **人工校准**（20 条标注集）：样本一致率 **90%**，`sql_equivalent` **95% / κ=0.857**，`answer_faithful` **95% / κ=0.857**，均达到 ≥85% / ≥0.6 门槛，故 AI 信号可作为辅助指标引用。收紧 Prompt 中 `answer_faithful`（"回答是否忠于候选结果集"）与 `answer_complete` 的定义后，faithful 一致率从 75%/κ0.47 提升到 95%/κ0.86。
+- **全量评审**（40 条）：SQL/结果等价 100%、回答忠实 86.5%、回答完整 70.3%、拒答合理 100%；`--judge` 复跑命中缓存 `cache_hits=40`、零新增调用。
+
+Judge 只补充语义信号，**execution_accuracy 仍是唯一主指标**；校准残留 2 条边界分歧（`ORDER BY` 行序、简短但可溯源的回答）如实保留，不将 20 点校准集过拟合到 100%。
 
 报告文件：
 
@@ -232,19 +281,28 @@ reports/eval_YYYYmmdd_HHMMSS.md     # 人可读，含失败用例与错误原因
 ## 经验记忆：为什么不会“越学越错”
 
 ```text
-Agent 执行成功 ──save_experience──> candidate ──人工 verify──> verified ──search_experience──> few-shot
+Agent 执行成功 ──save_experience──> candidate ──人工 verify──> verified ──自动注入 / search_experience──> few-shot
                                       │                         │
                                       └── 永不召回              └── 必须通过 SQL 护栏 + 真实执行
+
+Agent 终态失败（needs_human / failed / max_steps）──> failure_queue（同问题同 schema 只一行，重复计 occur_count）
+                                      │
+                                      └── 人工 experience resolve ──guard + 真实执行通过──> resolved + verified 经验
 ```
 
 - **准入闸门**：Agent 只能写候选；`verified` 必须由 CLI 人工确认，并再次通过 guard 与真实执行。
-- **知识失效**：经验带 `schema_hash`；表/字段变更后旧经验自动失效，不会污染新 schema。
+- **自动注入**：每轮运行前按类别加权召回，把 verified 经验拼进 system prompt（默认 3 条、1200 字符预算，整条丢弃不截断 SQL）；记忆层异常时静默降级为不注入，不影响答案。
+- **知识失效**：经验与失败记录都带 `schema_hash`；表/字段变更后旧经验自动失效，不会污染新 schema。
+- **失败闭环**：答不上的问题自动排队去重，已结案问题再次失败会重新打开；结案必须给出能通过护栏与真实执行的 SQL，杜绝“凭感觉结案”。
+- **类别体系**：`taxonomy.py` 用固定词表把问法归入 `inventory/purchase/production/bom/kitting/detail/group_by/ranking/time_filter/metric`，用于召回加权与经验打类；**不用于判断是否超范围**（那由 schema 查不到表 + 护栏决定）。
 - **去重**：同一归一化问题 + schema hash 唯一，避免重复样本挤占召回。
-- **可观测**：`hit_count` / `last_used_at` 记录复用情况。
+- **可观测**：`hit_count` / `last_used_at` 记录复用情况；`experience stats` 同时给出队列统计（`failures_by_category` 只统计 open，即待办积压）。
 
 ```bash
 nl2sql-agent experience list --status candidate
 nl2sql-agent experience verify 3
+nl2sql-agent experience failures --status open        # 待人工处理的失败队列
+nl2sql-agent experience resolve 1 --sql "SELECT ..." --note "口径说明"
 nl2sql-agent experience stats
 nl2sql-agent experience add --question "..." --sql "SELECT ..." --verified
 ```
@@ -261,14 +319,16 @@ src/nl2sql_agent/
 ├── catalog.py          # Schema Catalog、schema hash、BM25 schema linking
 ├── guard.py            # 只读/表白名单/敏感字段/必填过滤/列校验
 ├── repair.py           # 确定性 SQL 修复
+├── taxonomy.py         # 固定类别体系与规则分类器
 ├── memory/             # 经验库（candidate/verified 准入）
 ├── tools/              # 8 个工具及 JSON Schema 注册表
-├── evaluation/         # 冻结评测集、结果集比对、报告
+├── evaluation/         # 冻结评测集、结果集比对、AI Judge、校准、报告
 ├── demo/               # 合成 ERP 数据库
-└── data/               # demo_schema.json / demo_cases.jsonl
+└── data/               # demo_schema.json / demo_cases.jsonl / judge_prompt.txt / judge_calibration.jsonl
 
-tests/                  # 67 个单元 + 集成测试
+tests/                  # 132 个单元 + 集成测试
 docs/                   # 架构、工具协议、改进路线、提取说明
+CHANGELOG.md            # 版本记录：评测实测结果与每个指标的定义
 ```
 
 ---
@@ -301,6 +361,8 @@ docs/                   # 架构、工具协议、改进路线、提取说明
 - `mock` 只覆盖演示意图，不具备泛化能力；真实准确率必须在目标库上用评测集测量。
 - 经验召回目前是词法 + 编辑距离相似度，跨表述同义问题召回有限，路线图中计划引入 embedding。
 - 多轮上下文、权限按人过滤、查询成本预估尚未实现。
+- 经验闭环已实现自动注入与失败队列，但 few-shot 的**增益幅度尚未量化**：`mock` 模型不消费注入内容，需要在真实模型上做 `NL2SQL_FEWSHOT_ENABLED=false/true` 的 A/B 才能给出提升数字。
+- 类别分类器是关键词规则表，词表来自当前 40 条冻结集与 11 条人工改写；换域需要重新补词，不承诺跨库泛化。
 
 ## 路线图
 

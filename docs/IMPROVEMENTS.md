@@ -13,12 +13,14 @@
 - 工具调用 Agent 循环（8 个工具、12 轮上限、错误回灌、trace）。
 - Schema Catalog + BM25 表召回 + 字段级精读。
 - 六层只读 SQL Guard（语句/表/维度/列/敏感字段/`SELECT *`）。
-- 确定性修复（尾逗号、无效投影、GROUP BY 算术表达式）。
-- 经验库 candidate/verified 准入、schema hash 失效、相似度召回。
-- 16 条冻结评测集、结果集比对、JSON/Markdown 报告、CI。
+- 确定性修复（尾逗号、无效投影、GROUP BY 算术表达式）＋ 单题修复轮次硬上限（默认 2 轮，超限转人工）。
+- 经验库 candidate/verified 准入、schema hash 失效、相似度 + 类别加权召回、verified 经验自动 few-shot 注入。
+- 固定类别体系与规则分类器、失败问题自动入队去重、`experience failures/resolve` 人工结案闭环。
+- 40 条冻结评测集（11 类 + easy/medium/hard 分层）、结果集比对、`table_recall@5`、token 计量、按 category 切片、JSON/Markdown 报告、CI。
+- LLM-as-judge 辅助评审 + SQLite 缓存 + 20 条人工校准集（一致率 90%、κ0.857，qwen-max）。
 - 合成 ERP 库与离线规则模型，无 Key 可复现。
 
-**基线数字仅证明链路正确**：mock provider 16/16、执行准确率 100%。它不代表真实 LLM 在真实 ERP 上的准确率，不能写进简历当作模型效果。
+**基线数字仅证明链路正确**：mock provider 40/40、执行准确率 100%、`table_recall@5` 96%。它不代表真实 LLM 在真实 ERP 上的准确率，不能写进简历当作模型效果。AI 指标为辅助信号，主指标始终是确定性结果比对。
 
 ---
 
@@ -60,7 +62,7 @@
 **验收**：
 
 - 新增 30 条对抗用例（嵌套写操作、注释绕过、UNION 注入、`WITH ... DELETE`、大小写/方括号混用）全部拒绝。
-- 现有 16 条评测集不回归。
+- 现有 40 条评测集不回归。
 - 解析失败时返回明确 `parse_error`，不执行。
 
 ### P0-2 真实模型基线
@@ -82,6 +84,8 @@
 ### P0-3 评测集扩容与分层
 
 **问题**：16 条只覆盖“快乐路径”，不足以指导优化。
+
+> 状态：第一阶段已完成——评测集扩到 40 条（37 可回答 + 3 拒答），覆盖 11 类，`category`/`difficulty`/`expected_tables`/`tags` 全部标注，报告可按 category 切片。**难例占比 10%（hard 4/40），尚未达到 ≥ 30% 目标**；`by_difficulty` 切片、每类 ≥ 10 条、同义改写集、对抗集、方言集与 100+ 扩容仍待做。
 
 **方案**：
 
@@ -178,6 +182,8 @@
 ### P1-4 经验召回升级
 
 **现状**：词法 Jaccard + 编辑距离，跨表述召回有限；经验按单题存储。
+
+> 状态（2026-10-22）：**部分完成**。已落地固定类别体系 + 规则分类器（冻结集 37/37、held-out 改写 11/11）、类别加权召回、verified-only 自动 few-shot 注入（3 条 / 1200 字符预算）、失败队列与 `experience resolve` 人工结案闭环；单测覆盖候选经验零泄漏。未做：embedding 召回、多样性选择、反例经验、`gold/deprecated` 分级、few-shot A/B 归因。因 `mock` 模型不消费注入内容，**A/B 提升数字需在真实模型上补测后才能默认宣称有效**。
 
 **方案**：
 

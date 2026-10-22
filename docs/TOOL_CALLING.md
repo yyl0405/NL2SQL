@@ -222,7 +222,9 @@
 {"name": "save_experience", "arguments": {"question": "...", "sql": "SELECT ...", "category": "inventory"}}
 ```
 
-`search_experience` 只返回 verified 且 schema hash 匹配的样本；`save_experience` 只写 candidate，且 SQL 必须通过 guard。
+`search_experience` 只返回 verified 且 schema hash 匹配的样本，并按问题类别加权（同类别加分，默认 0.12）；返回值带 `category` 说明本次分类结果。`save_experience` 只写 candidate，且 SQL 必须通过 guard；`category` 缺省时由规则分类器自动填写。
+
+除工具调用外，Agent 在每轮运行前会**自动**把召回到的 verified 经验注入 system prompt（默认 3 条 / 1200 字符预算），模型不需要显式调用 `search_experience` 也能拿到参考；两者共用同一 store 与同一“候选经验不可召回”的过滤条件。
 
 ---
 
@@ -254,6 +256,13 @@ assistant: tool_calls=[repair_sql({"sql": "...", "error": "no such column: o.amo
 tool:      {"ok": true, "data": {"sql": "... fixed ...", "changed": true, "applied": ["remove_invalid_projection"]}}
 assistant: tool_calls=[execute_sql({"sql": "... fixed ..."})]
 tool:      {"ok": true, "data": {"success": true, ...}}
+```
+
+修复轮次有硬上限（`NL2SQL_MAX_REPAIRS`，默认 2）。超限后的 `repair_sql` 调用不会进入工具层，Agent 直接返回：
+
+```text
+assistant: tool_calls=[repair_sql({"sql": "...", "error": "..."})]
+tool:      {"ok": false, "error": "确定性修复已达上限 2 轮，不再接受新的修复调用。请停止修复，输出 status=needs_human 并说明未解决的报错。"}
 ```
 
 ---

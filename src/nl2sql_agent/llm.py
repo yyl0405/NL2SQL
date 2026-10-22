@@ -25,6 +25,7 @@ class LLMResponse:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class ChatModel(Protocol):
@@ -83,8 +84,15 @@ class OpenAICompatibleLLM:
             tool_calls.append(
                 ToolCall(id=call.id or f"call-{len(tool_calls)}", name=call.function.name, arguments=arguments)
             )
+        usage: dict[str, int] = {}
+        usage_obj = getattr(response, "usage", None)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = getattr(usage_obj, key, None) if usage_obj is not None else None
+            if value is not None:
+                usage[key] = int(value)
         return LLMResponse(
             content=message.content or "",
             tool_calls=tool_calls,
             finish_reason=response.choices[0].finish_reason or "",
+            usage=usage,
         )

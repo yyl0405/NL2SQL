@@ -32,7 +32,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-nl2sql_agent = ["data/*.json", "data/*.jsonl"]
+nl2sql_agent = ["data/*.json", "data/*.jsonl", "data/*.txt"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

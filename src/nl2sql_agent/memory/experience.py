@@ -1,8 +1,14 @@
-"""Verified experience memory with an admission gate.
+"""Verified experience memory with an admission gate and a failure queue.
 
 Only human-verified examples are ever injected into the agent context.
 Agent-generated examples are stored as `candidate`, which prevents a bad
 answer from being reinforced through its own output.
+
+Terminal agent failures land in `failure_queue` so that a question the system
+could not answer becomes a reviewable work item instead of disappearing. One
+question is queued once per schema version; closing an item requires a SQL that
+passes the guard and executes successfully, which then promotes the pair to a
+verified experience.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from ..taxonomy import classify_category
 from ..text import jaccard, normalize_question, tokenize
 
 Validator = Callable[[str], tuple[bool, str]]
@@ -63,6 +70,30 @@ class ExperienceStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_experience_status ON experiences(status, schema_hash)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS failure_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    question TEXT NOT NULL,
+                    normalized_question TEXT NOT NULL,
+                    schema_hash TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    last_sql TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    occur_count INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    resolution TEXT NOT NULL DEFAULT '',
+                    UNIQUE(normalized_question, schema_hash)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_failure_status ON failure_queue(status, occur_count DESC)"
+            )
 
     def add(
         self,
@@ -87,6 +118,7 @@ class ExperienceStore:
         status = "verified" if verified else "candidate"
         quality = "hard" if verified else "candidate"
         normalized = normalize_question(question)
+        category = (category or "").strip() or classify_category(question)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         with self._session() as conn:
@@ -150,6 +182,9 @@ class ExperienceStore:
         schema_hash: str = "",
         top_k: int = 3,
         min_score: float = 0.3,
+        category: str = "",
+        category_boost: float = 0.12,
+        strict_category: bool = False,
     ) -> list[dict[str, Any]]:
         normalized = normalize_question(question)
         query_tokens = tokenize(question)
@@ -163,6 +198,8 @@ class ExperienceStore:
             ).fetchall()
             scored: list[tuple[float, sqlite3.Row]] = []
             for row in rows:
+                if strict_category and category and row["category"] and row["category"] != category:
+                    continue
                 if row["normalized_question"] == normalized:
                     score = 1.0
                 else:
@@ -175,6 +212,8 @@ class ExperienceStore:
                         normalized in row["normalized_question"] or row["normalized_question"] in normalized
                     ):
                         score += 0.08
+                if category and row["category"] == category:
+                    score += max(0.0, category_boost)
                 score = min(1.0, score)
                 if score >= min_score:
                     scored.append((score, row))
@@ -225,6 +264,157 @@ class ExperienceStore:
             "verified": verified,
             "candidates": candidates,
             "reuse_hits": hits,
+            **self.failure_stats(),
+        }
+
+    def record_failure(
+        self,
+        question: str,
+        *,
+        reason: str,
+        category: str = "",
+        sql: str = "",
+        detail: str = "",
+        schema_hash: str = "",
+    ) -> dict[str, Any]:
+        """Queue a terminal failure once per question and schema version.
+
+        A question already marked resolved flips back to `open`: a failure that
+        comes back after being answered is a regression worth looking at, and it
+        must not be silently dropped.
+        """
+        question = (question or "").strip()
+        if not question:
+            return {"created": False, "skipped": "empty_question"}
+        normalized = normalize_question(question)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        category = (category or "").strip() or classify_category(question)
+        with self._session() as conn:
+            existing = conn.execute(
+                "SELECT * FROM failure_queue WHERE normalized_question = ? AND schema_hash = ?",
+                (normalized, schema_hash),
+            ).fetchone()
+            if existing:
+                reopened = existing["status"] != "open"
+                conn.execute(
+                    """
+                    UPDATE failure_queue
+                    SET occur_count = occur_count + 1, last_seen_at = ?, reason = ?,
+                        category = ?, last_sql = ?, detail = ?,
+                        status = CASE WHEN ? = 'resolved' OR ? = 'dismissed' THEN 'open' ELSE status END
+                    WHERE id = ?
+                    """,
+                    (now, reason, category, sql, detail, existing["status"], existing["status"], existing["id"]),
+                )
+                row = conn.execute("SELECT * FROM failure_queue WHERE id = ?", (existing["id"],)).fetchone()
+                result = self._row(row)
+                result.update({"created": False, "duplicate": True, "reopened": reopened})
+                return result
+
+            cursor = conn.execute(
+                """
+                INSERT INTO failure_queue
+                    (question, normalized_question, schema_hash, category, reason, last_sql,
+                     detail, status, occur_count, created_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 1, ?, ?)
+                """,
+                (question, normalized, schema_hash, category, reason, sql, detail, now, now),
+            )
+            row = conn.execute("SELECT * FROM failure_queue WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        result = self._row(row)
+        result.update({"created": True, "duplicate": False, "reopened": False})
+        return result
+
+    def list_failures(self, status: str | None = "open", limit: int = 50) -> list[dict[str, Any]]:
+        query = "SELECT * FROM failure_queue"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY occur_count DESC, last_seen_at DESC, id DESC LIMIT ?"
+        params.append(max(1, limit))
+        with self._session() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row(row) for row in rows]
+
+    def get_failure(self, failure_id: int) -> dict[str, Any]:
+        with self._session() as conn:
+            row = conn.execute("SELECT * FROM failure_queue WHERE id = ?", (failure_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"失败记录 {failure_id} 不存在")
+        return self._row(row)
+
+    def resolve_failure(
+        self,
+        failure_id: int,
+        sql: str,
+        *,
+        validator: Validator,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Close a queued failure with SQL that passes the guard and executes.
+
+        The question/SQL pair is promoted straight to `verified` because a human
+        supplied and machine-checked the SQL; the queue item and the reusable
+        experience are written in the same call so the two cannot drift apart.
+        """
+        sql = (sql or "").strip()
+        if not sql:
+            raise ValueError("resolve 需要给出 SQL")
+        if validator is None:
+            raise ValueError("resolve 必须提供 validator（护栏 + 真实执行），不能凭肉眼结案")
+        failure = self.get_failure(failure_id)
+        ok, message = validator(sql)
+        if not ok:
+            raise ValueError(f"SQL 未通过护栏或执行校验，不能结案: {message}")
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._session() as conn:
+            conn.execute(
+                """
+                UPDATE failure_queue
+                SET status = 'resolved', resolved_at = ?, resolution = ?, last_sql = ?
+                WHERE id = ?
+                """,
+                (now, (note or "").strip(), sql, failure_id),
+            )
+            row = conn.execute("SELECT * FROM failure_queue WHERE id = ?", (failure_id,)).fetchone()
+        experience = self.add(
+            failure["question"],
+            sql,
+            category=failure["category"] or classify_category(failure["question"]),
+            source="human",
+            verified=True,
+            schema_hash=str(failure["schema_hash"] or ""),
+            validator=validator,
+        )
+        return {"failure": self._row(row), "experience": experience}
+
+    def failure_stats(self) -> dict[str, Any]:
+        """`failures_by_category` only counts open rows: it is the triage backlog."""
+        with self._session() as conn:
+            by_status = {
+                row["status"]: row["n"]
+                for row in conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM failure_queue GROUP BY status"
+                ).fetchall()
+            }
+            by_category = {
+                row["category"] or "uncategorized": row["n"]
+                for row in conn.execute(
+                    "SELECT category, COUNT(*) AS n FROM failure_queue "
+                    "WHERE status = 'open' GROUP BY category"
+                ).fetchall()
+            }
+            repeated = conn.execute(
+                "SELECT COALESCE(SUM(occur_count), 0) AS n FROM failure_queue"
+            ).fetchone()["n"]
+        return {
+            "failures_total": sum(by_status.values()),
+            "failures_open": by_status.get("open", 0),
+            "failures_resolved": by_status.get("resolved", 0),
+            "failures_by_category": by_category,
+            "failure_occurrences": repeated,
         }
 
     @staticmethod

@@ -34,6 +34,13 @@ def _as_int(value: str | None, default: int) -> int:
         return default
 
 
+def _as_float(value: str | None, default: float) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass
 class Settings:
     provider: str = "mock"
@@ -51,6 +58,22 @@ class Settings:
     allow_sensitive: bool = False
     demo_today: str = "2026-07-01"
     request_timeout_sec: float = 120.0
+    judge_enabled: bool = False
+    judge_provider: str = "openai"
+    judge_model: str = "qwen-max"
+    judge_base_url: str = ""
+    judge_api_key: str = ""
+    judge_max_tokens: int = 800
+    judge_max_rows: int = 20
+    judge_cache_path: Path | None = None
+    judge_prompt_version: str = "judge-v2"
+    judge_max_calls: int = 100
+    few_shot_enabled: bool = True
+    few_shot_max: int = 3
+    few_shot_max_chars: int = 1200
+    capture_failures: bool = True
+    max_repairs: int = 2
+    category_boost: float = 0.12
 
     def __post_init__(self) -> None:
         self.home = Path(self.home).resolve()
@@ -58,8 +81,11 @@ class Settings:
             self.db_path = self.home / "var" / "demo_erp.db"
         if self.experience_path is None:
             self.experience_path = self.home / "var" / "experience.db"
+        if self.judge_cache_path is None:
+            self.judge_cache_path = self.home / "var" / "judge_cache.sqlite"
         self.db_path = Path(self.db_path)
         self.experience_path = Path(self.experience_path)
+        self.judge_cache_path = Path(self.judge_cache_path)
 
     @classmethod
     def load(cls, home: str | Path | None = None, provider: str | None = None) -> "Settings":
@@ -78,14 +104,15 @@ class Settings:
         if not selected_provider:
             selected_provider = "openai" if api_key else "mock"
 
+        base_url = (
+            os.getenv("NL2SQL_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        ).strip()
         settings = cls(
             provider=selected_provider,
             model=(os.getenv("NL2SQL_MODEL") or os.getenv("OPENAI_MODEL") or "qwen-plus").strip(),
-            base_url=(
-                os.getenv("NL2SQL_BASE_URL")
-                or os.getenv("OPENAI_BASE_URL")
-                or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            ).strip(),
+            base_url=base_url,
             api_key=api_key,
             home=base,
             db_path=(os.getenv("NL2SQL_DB_PATH") or None),
@@ -98,6 +125,22 @@ class Settings:
             allow_sensitive=_as_bool(os.getenv("NL2SQL_ALLOW_SENSITIVE"), False),
             demo_today=os.getenv("NL2SQL_DEMO_TODAY", "2026-07-01").strip(),
             request_timeout_sec=float(os.getenv("NL2SQL_REQUEST_TIMEOUT_SEC", "120")),
+            judge_enabled=_as_bool(os.getenv("NL2SQL_JUDGE_ENABLED"), False),
+            judge_provider=(os.getenv("NL2SQL_JUDGE_PROVIDER") or "openai").strip().lower(),
+            judge_model=(os.getenv("NL2SQL_JUDGE_MODEL") or "qwen-max").strip(),
+            judge_base_url=(os.getenv("NL2SQL_JUDGE_BASE_URL") or base_url).strip(),
+            judge_api_key=(os.getenv("NL2SQL_JUDGE_API_KEY") or api_key).strip(),
+            judge_max_tokens=_as_int(os.getenv("NL2SQL_JUDGE_MAX_TOKENS"), 800),
+            judge_max_rows=_as_int(os.getenv("NL2SQL_JUDGE_MAX_ROWS"), 20),
+            judge_cache_path=(os.getenv("NL2SQL_JUDGE_CACHE_PATH") or None),
+            judge_prompt_version=(os.getenv("NL2SQL_JUDGE_PROMPT_VERSION") or "judge-v2").strip(),
+            judge_max_calls=_as_int(os.getenv("NL2SQL_JUDGE_MAX_CALLS"), 100),
+            few_shot_enabled=_as_bool(os.getenv("NL2SQL_FEWSHOT_ENABLED"), True),
+            few_shot_max=_as_int(os.getenv("NL2SQL_FEWSHOT_MAX"), 3),
+            few_shot_max_chars=_as_int(os.getenv("NL2SQL_FEWSHOT_MAX_CHARS"), 1200),
+            capture_failures=_as_bool(os.getenv("NL2SQL_CAPTURE_FAILURES"), True),
+            max_repairs=_as_int(os.getenv("NL2SQL_MAX_REPAIRS"), 2),
+            category_boost=_as_float(os.getenv("NL2SQL_CATEGORY_BOOST"), 0.12),
         )
         return settings
 
@@ -108,6 +151,10 @@ class Settings:
     @property
     def eval_cases_path(self) -> Path:
         return Path(__file__).resolve().parent / "data" / "demo_cases.jsonl"
+
+    @property
+    def calibration_path(self) -> Path:
+        return Path(__file__).resolve().parent / "data" / "judge_calibration.jsonl"
 
     def ensure_dirs(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)

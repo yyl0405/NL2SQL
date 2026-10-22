@@ -11,7 +11,15 @@ from typing import Any
 from .agent import AgentResult
 from .config import Settings
 from .demo import seed
-from .evaluation import evaluate, load_cases
+from .evaluation import (
+    CachedJudge,
+    JudgeCache,
+    JudgeError,
+    LLMJudge,
+    evaluate,
+    load_cases,
+)
+from .evaluation.calibration import CalibrationResult, calibrate, load_calibration
 from .memory import ExperienceStore
 from .runtime import Runtime, create_runtime
 from .text import format_table
@@ -70,6 +78,13 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--cases", help="评测集 JSONL 路径")
     eval_parser.add_argument("--report-dir", default="reports")
     eval_parser.add_argument("--json", action="store_true")
+    eval_parser.add_argument("--judge", action="store_true", help="启用 AI Judge 评审")
+    eval_parser.add_argument("--judge-on-fail", action="store_true", help="只评审确定性失败用例")
+    eval_parser.add_argument("--judge-sample", type=int, help="随机抽样 N 条评审（固定种子）")
+    eval_parser.add_argument("--no-judge-cache", action="store_true", help="绕过 Judge 缓存")
+    eval_parser.add_argument("--calibrate", action="store_true", help="运行 Judge 人工校准")
+    eval_parser.add_argument("--calibration", help="校准集 JSONL 路径")
+    eval_parser.add_argument("--compare", help="对比基线 JSON 报告")
     _add_runtime_options(eval_parser)
     eval_parser.set_defaults(func=_cmd_eval)
 
@@ -97,6 +112,22 @@ def _build_parser() -> argparse.ArgumentParser:
     exp_stats = exp_sub.add_parser("stats", help="经验库统计")
     exp_stats.add_argument("--home")
     exp_stats.set_defaults(func=_cmd_experience_stats)
+
+    exp_failures = exp_sub.add_parser("failures", help="列出待人工处理的失败队列")
+    exp_failures.add_argument("--status", choices=["open", "resolved", "all"], default="open")
+    exp_failures.add_argument("--limit", type=int, default=20)
+    exp_failures.add_argument("--json", action="store_true", dest="as_json")
+    exp_failures.add_argument("--home")
+    exp_failures.set_defaults(func=_cmd_experience_failures)
+
+    exp_resolve = exp_sub.add_parser(
+        "resolve", help="用通过护栏且真实执行成功的 SQL 结案一条失败记录"
+    )
+    exp_resolve.add_argument("id", type=int)
+    exp_resolve.add_argument("--sql", required=True)
+    exp_resolve.add_argument("--note", default="")
+    exp_resolve.add_argument("--home")
+    exp_resolve.set_defaults(func=_cmd_experience_resolve)
     return parser
 
 
@@ -137,6 +168,36 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
 def _cmd_eval(args: argparse.Namespace) -> int:
     runtime = _runtime(args)
+    judge_model = None
+    judge_requested = (
+        args.judge
+        or args.judge_on_fail
+        or args.judge_sample is not None
+        or args.calibrate
+        or runtime.settings.judge_enabled
+    )
+    if judge_requested:
+        try:
+            judge_model = _build_judge(args, runtime.settings)
+        except JudgeError as exc:
+            print(f"Judge 配置错误: {exc}", file=sys.stderr)
+            return 2
+
+    if args.calibrate:
+        cases_path = Path(args.calibration) if args.calibration else runtime.settings.calibration_path
+        result = calibrate(
+            judge_model,
+            load_calibration(cases_path),
+            db_path=runtime.settings.db_path,
+            catalog=runtime.catalog,
+            max_rows=runtime.settings.judge_max_rows,
+        )
+        if args.json:
+            print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            _print_calibration(result)
+        return 0 if _calibration_passed(result) else 1
+
     cases_path = Path(args.cases) if args.cases else runtime.settings.eval_cases_path
     cases = load_cases(cases_path)
     report = evaluate(
@@ -146,17 +207,105 @@ def _cmd_eval(args: argparse.Namespace) -> int:
         guard=runtime.guard,
         provider=runtime.settings.provider,
         report_dir=args.report_dir,
+        model="" if runtime.settings.provider == "mock" else runtime.settings.model,
+        judge_model=judge_model,
+        judge_on_fail=args.judge_on_fail,
+        judge_sample=args.judge_sample,
+        judge_max_calls=runtime.settings.judge_max_calls,
+        judge_max_rows=runtime.settings.judge_max_rows,
     )
+    payload = report.to_dict()
+    if args.compare:
+        try:
+            payload["comparison"] = _compare_reports(Path(args.compare), report)
+        except (OSError, ValueError) as exc:
+            print(f"无法读取基线报告: {exc}", file=sys.stderr)
+            return 2
     if args.json:
-        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"Provider: {report.provider}")
         print(f"Cases: {report.total} | Passed: {report.passed}")
         for key, value in report.metrics.items():
             print(f"{key}: {value}")
+        if report.judge.get("enabled"):
+            print(
+                f"AI Judge: {report.judge.get('status')} | "
+                f"judged={report.judge.get('judged_cases')} | "
+                f"unknown={report.judge.get('unknown_cases')} | "
+                f"cache_hits={report.judge.get('cache_hits')}"
+            )
+        if args.compare:
+            _print_comparison(payload["comparison"])
         print(f"Reports written to: {Path(args.report_dir).resolve()}")
     failed = [case for case in report.cases if not case.passed]
     return 0 if not failed else 1
+
+
+def _build_judge(args: argparse.Namespace, settings: Any) -> Any:
+    judge = LLMJudge(settings)
+    if args.no_judge_cache:
+        return judge
+    cache = JudgeCache(settings.judge_cache_path)
+    return CachedJudge(
+        judge,
+        cache,
+        model_name=settings.judge_model,
+        prompt_version=settings.judge_prompt_version,
+    )
+
+
+def _print_calibration(result: CalibrationResult) -> None:
+    print(f"Cases: {result.total} | Evaluated: {result.evaluated} | Unknown: {result.unknown}")
+    print(f"Agreement: {result.agreement:.2%}")
+    for field, metrics in result.field_metrics.items():
+        print(
+            f"{field}: agreement={metrics['agreement']:.2%} "
+            f"kappa={metrics['kappa']:.4f} (n={metrics['considered']})"
+        )
+    print("Target: agreement >= 85%, kappa >= 0.6")
+
+
+def _calibration_passed(result: CalibrationResult) -> bool:
+    if result.agreement < 0.85:
+        return False
+    for field in ("sql_equivalent", "answer_faithful"):
+        metrics = result.field_metrics.get(field)
+        if metrics and metrics["kappa"] < 0.6:
+            return False
+    return True
+
+
+def _compare_reports(path: Path, report: Any) -> dict[str, Any]:
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    baseline_metrics = baseline.get("metrics") or {}
+    comparisons: dict[str, dict[str, float]] = {}
+    for key in (
+        "execution_accuracy",
+        "valid_sql_rate",
+        "execution_success_rate",
+        "refusal_accuracy",
+        "table_recall_at_5",
+        "avg_steps",
+        "avg_latency_ms",
+        "avg_tokens",
+    ):
+        old = baseline_metrics.get(key)
+        new = report.metrics.get(key)
+        if old is None or new is None:
+            continue
+        comparisons[key] = {
+            "baseline": float(old),
+            "current": float(new),
+            "delta": round(float(new) - float(old), 4),
+        }
+    return {"baseline": str(path), "metrics": comparisons}
+
+
+def _print_comparison(comparison: dict[str, Any]) -> None:
+    print(f"Baseline: {comparison.get('baseline')}")
+    for key, item in (comparison.get("metrics") or {}).items():
+        print(f"  {key}: {item['baseline']} -> {item['current']} ({item['delta']:+.4f})")
 
 
 def _cmd_experience_list(args: argparse.Namespace) -> int:
@@ -175,23 +324,29 @@ def _cmd_experience_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sql_validator(runtime: Runtime):
+    """Guard + real read-only execution against the demo DB."""
+
+    def validator(sql: str) -> tuple[bool, str]:
+        check = runtime.guard.check(sql)
+        if not check.valid:
+            return False, "; ".join(issue.message for issue in check.errors)
+        execution = run_readonly_query(
+            runtime.settings.db_path,
+            check.sql,
+            max_rows=runtime.settings.max_rows,
+            timeout_ms=runtime.settings.query_timeout_ms,
+        )
+        if not execution.get("success"):
+            return False, str(execution.get("error", "execution failed"))
+        return True, "ok"
+
+    return validator
+
+
 def _cmd_experience_add(args: argparse.Namespace) -> int:
     runtime = _runtime(args)
-    validator = None
-    if args.verified:
-        def validator(sql: str) -> tuple[bool, str]:  # type: ignore[no-redef]
-            check = runtime.guard.check(sql)
-            if not check.valid:
-                return False, "; ".join(issue.message for issue in check.errors)
-            execution = run_readonly_query(
-                runtime.settings.db_path,
-                check.sql,
-                max_rows=runtime.settings.max_rows,
-                timeout_ms=runtime.settings.query_timeout_ms,
-            )
-            if not execution.get("success"):
-                return False, str(execution.get("error", "execution failed"))
-            return True, "ok"
+    validator = _sql_validator(runtime) if args.verified else None
 
     store = runtime.store
     record = store.add(
@@ -209,22 +364,7 @@ def _cmd_experience_add(args: argparse.Namespace) -> int:
 
 def _cmd_experience_verify(args: argparse.Namespace) -> int:
     runtime = _runtime(args)
-
-    def validator(sql: str) -> tuple[bool, str]:
-        check = runtime.guard.check(sql)
-        if not check.valid:
-            return False, "; ".join(issue.message for issue in check.errors)
-        execution = run_readonly_query(
-            runtime.settings.db_path,
-            check.sql,
-            max_rows=runtime.settings.max_rows,
-            timeout_ms=runtime.settings.query_timeout_ms,
-        )
-        if not execution.get("success"):
-            return False, str(execution.get("error", "execution failed"))
-        return True, "ok"
-
-    record = runtime.store.verify(args.id, validator=validator)
+    record = runtime.store.verify(args.id, validator=_sql_validator(runtime))
     print(json.dumps(record, ensure_ascii=False, indent=2))
     return 0
 
@@ -233,6 +373,47 @@ def _cmd_experience_stats(args: argparse.Namespace) -> int:
     settings = Settings.load(home=args.home)
     store = ExperienceStore(settings.experience_path)
     print(json.dumps(store.stats(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_experience_failures(args: argparse.Namespace) -> int:
+    settings = Settings.load(home=args.home)
+    store = ExperienceStore(settings.experience_path)
+    status = None if args.status == "all" else args.status
+    rows = store.list_failures(status=status, limit=args.limit)
+    if args.as_json:
+        print(json.dumps({"items": rows, **store.failure_stats()}, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("失败队列为空（status=%s）。" % (args.status,))
+        return 0
+    print(f"失败队列 {args.status} 共 {len(rows)} 条 | {json.dumps(store.failure_stats(), ensure_ascii=False)}\n")
+    for row in rows:
+        print(
+            f"#{row['id']} [{row['status']}] x{row['occur_count']} "
+            f"({row['category'] or '-'}): {row['question']}"
+        )
+        print(f"    reason={row['reason']} detail={str(row['detail'])[:120]}")
+        if row["last_sql"]:
+            print(f"    最后一次尝试: {str(row['last_sql'])[:160]}")
+    print("\n结案：nl2sql-agent experience resolve <id> --sql \"...\" --note \"口径说明\"")
+    return 0
+
+
+def _cmd_experience_resolve(args: argparse.Namespace) -> int:
+    runtime = _runtime(args)
+    try:
+        result = runtime.store.resolve_failure(
+            args.id,
+            args.sql,
+            validator=_sql_validator(runtime),
+            note=args.note,
+        )
+    except (KeyError, ValueError) as exc:
+        print(f"结案失败: {exc}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("已结案，并把该问答对写为 verified 经验（后续同类问题会自动注入 few-shot）。")
     return 0
 
 

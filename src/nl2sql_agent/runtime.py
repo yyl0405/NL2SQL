@@ -53,7 +53,12 @@ def create_runtime(settings: Settings | None = None, provider: str | None = None
         timeout_ms=settings.query_timeout_ms,
     ):
         registry.register(tool)
-    for tool in build_experience_tools(store, catalog.schema_hash(), guard):
+    for tool in build_experience_tools(
+        store,
+        catalog.schema_hash(),
+        guard,
+        category_boost=settings.category_boost,
+    ):
         registry.register(tool)
 
     if settings.provider == "mock":
@@ -63,7 +68,14 @@ def create_runtime(settings: Settings | None = None, provider: str | None = None
     else:
         raise ValueError(f"未知 provider: {settings.provider}，可选 mock / openai")
 
-    agent = NL2SQLAgent(catalog=catalog, llm=llm, tools=registry, settings=settings)
+    agent = NL2SQLAgent(
+        catalog=catalog,
+        llm=llm,
+        tools=registry,
+        settings=settings,
+        store=store,
+        schema_hash=catalog.schema_hash(),
+    )
     return Runtime(settings=settings, catalog=catalog, guard=guard, store=store, agent=agent)
 
 

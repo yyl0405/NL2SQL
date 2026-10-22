@@ -42,7 +42,8 @@
 | `Catalog` | `catalog.py` | schema 加载、schema hash、BM25 表召回、关系/业务口径 |
 | `SQLGuard` | `guard.py` | 只读、表白名单、必填过滤、列级权限、`SELECT *` 检查 |
 | `SQLRepairer` | `repair.py` | 基于数据库错误的确定性修复 |
-| `ExperienceStore` | `memory/experience.py` | 经验持久化、准入、schema 失效、相似度召回 |
+| `ExperienceStore` | `memory/experience.py` | 经验持久化、准入、schema 失效、相似度召回、失败队列 |
+| `taxonomy` | `taxonomy.py` | 固定类别体系与规则分类器（召回加权、经验打类） |
 | `ToolRegistry` | `tools/base.py` | 工具注册、JSON Schema、参数绑定、错误回灌 |
 | `run_readonly_query` | `tools/sql_tools.py` | 只读执行、超时、行数限制、截断标记 |
 | `evaluate` | `evaluation/evaluator.py` | 冻结集执行、结果集比对、指标与报告 |
@@ -54,7 +55,9 @@
 伪代码（对应 `NL2SQLAgent.run`）：
 
 ```python
-messages = [system_prompt, user_question]
+category = classify(question)                  # 规则分类器，用于召回加权
+messages = [system_prompt + few_shot_block(question, category), user_question]
+repairs = 0
 for step in range(1, max_steps + 1):
     response = llm.chat(messages, tools=registry.specs())
 
@@ -64,7 +67,12 @@ for step in range(1, max_steps + 1):
     messages.append(assistant_tool_calls(response))
 
     for call in response.tool_calls:
-        payload = registry.call(call.name, call.arguments)
+        if call.name == "repair_sql" and repairs >= max_repairs:
+            payload = reject("确定性修复已达上限，请输出 status=needs_human")
+        else:
+            payload = registry.call(call.name, call.arguments)
+        if call.name == "repair_sql":
+            repairs += 1
         messages.append(tool_observation(call.id, payload))
         trace.append(summarize(payload))
 
@@ -72,7 +80,8 @@ for step in range(1, max_steps + 1):
             last_sql = payload.data.sql
         if call.name == "execute_sql" and payload.data.success:
             last_execution = payload.data
-return max_steps_result(last_sql, trace)
+result = build_result(...)                 # 终态失败时 best-effort 写入 failure_queue
+return result
 ```
 
 设计要点：
@@ -81,6 +90,9 @@ return max_steps_result(last_sql, trace)
 2. **执行证据优先**：只有 `execute_sql` 成功才会记录 `last_execution`；最终 `status=ok` 必须存在执行证据。
 3. **trace 可审计**：每次工具调用记录 step、参数、ok、摘要、耗时，便于定位“模型为什么这么写”。
 4. **步数上限**：默认 12 轮，防止模型在错误路径上无限循环；超限返回 `max_steps` 而不是伪造答案。
+5. **修复轮次上限**：`repair_sql` 超过 `max_repairs`（默认 2）后由 Agent 直接拦截，把“最多修两轮”从提示词约束变成不可绕过的硬护栏。
+6. **verified-only 自动注入**：每次运行前按类别加权召回已验证经验并注入 system prompt（条数与字符双预算），模型不需要主动想起来调 `search_experience`；召回失败或记忆层异常一律降级为“不注入”。
+7. **终态失败入队**：`needs_human / failed / max_steps` 会 best-effort 落入 `failure_queue`（见 §7.2），供人工结案；澄清与拒答不入队。
 
 ### 最终状态机
 
@@ -175,7 +187,7 @@ LLM final JSON
 
 ## 7. 经验记忆
 
-表结构：
+### 7.1 表结构
 
 ```sql
 experiences(
@@ -185,9 +197,20 @@ experiences(
   schema_hash, hit_count, created_at, last_used_at,
   UNIQUE(normalized_question, schema_hash)
 )
+
+failure_queue(
+  id, question, normalized_question, schema_hash, category,
+  reason,       -- needs_human | failed | max_steps
+  last_sql, detail,
+  status,       -- open | resolved | dismissed
+  occur_count, created_at, last_seen_at, resolved_at, resolution,
+  UNIQUE(normalized_question, schema_hash)
+)
 ```
 
-准入流程：
+`category` 由 `taxonomy.classify_category()` 规则分类器填写（`inventory / purchase / production / bom / kitting / detail / group_by / ranking / time_filter / metric`，无命中为 `unknown`）；调用方显式给出类别时不覆盖。分类器只区分领域与答案形态，**不承担超范围/拒答判定**（那由 schema 查不到表 + 护栏决定）。
+
+### 7.2 准入流程
 
 ```text
 execute_sql 成功
@@ -196,20 +219,35 @@ execute_sql 成功
                  ├─ guard.check(sql) 必须通过
                  ├─ 真实执行必须成功
                  └─ → verified（可召回）
+
+Agent 终态失败（needs_human / failed / max_steps）
+   └─ record_failure → failure_queue open
+          ├─ 同 (归一化问题, schema_hash) 只保一行，重复只累加 occur_count
+          ├─ 已结案的再次失败 → 自动 reopened
+          └─ 人工 experience resolve <id> --sql "..."
+                 ├─ validator = guard.check + 真实只读执行（缺一即抛错，队列保持 open）
+                 └─ → 队列 resolved ＋ experiences 立即写入 verified
 ```
 
-召回：
+入队发生在结果组装阶段并被 try/except 包裹：记忆层故障不得改变返回给用户的答案。`needs_clarification` 与 `refused` 不入队——它们是正确的行为而非失败。`experience stats` 合并队列指标，其中 `failures_by_category` 只统计 open 行（待人工处理的积压）。
 
-- 只在 `status='verified' AND schema_hash=当前hash` 中搜索；
+### 7.3 召回与自动注入
+
+- 只在 `status='verified' AND schema_hash=当前hash` 中搜索（候选经验在 SQL 层就被排除）；
 - 精确归一化问题得 1.0；
 - 其它：`0.55 * token Jaccard + 0.45 * SequenceMatcher`，子串匹配 +0.08；
+- 与问题**同类别**的 verified 经验额外加 `category_boost`（默认 0.12，置 0 关闭；`strict_category=True` 时直接过滤掉异类）；
 - 默认阈值 0.3，top-k=3；命中更新 `hit_count/last_used_at`。
 
-**设计动机**：LLM 自生成经验容易形成“错误答案 → 存库 → 下次召回 → 继续错误”的闭环。人工验证是刻意保留的瓶颈；schema hash 则解决表结构变更后的知识过期。
+除 `search_experience` 工具之外，Agent 在每轮运行前**自动**把召回结果拼进 system prompt：`few_shot_max`（默认 3）条、`few_shot_max_chars`（默认 1200）字符预算，按整块丢弃以保证 SQL 不被截断；`few_shot_enabled=false` 可完全关闭。注入内容只作 few-shot 参考，不允许据此跳过 validate/execute。
+
+**设计动机**：LLM 自生成经验容易形成“错误答案 → 存库 → 下次召回 → 继续错误”的闭环。人工验证是刻意保留的瓶颈；schema hash 则解决表结构变更后的知识过期；失败队列把“答不上的问题”变成可统计、可结案的人工待办，结案产物又直接回流为可注入经验，闭环由此合上。
 
 ---
 
 ## 8. 评测设计
+
+### 8.1 确定性主指标
 
 ```text
 case.question → agent.run()
@@ -219,15 +257,32 @@ case.gold_sql → run_readonly_query()
               rows_equal(agent.rows, gold.rows)
 ```
 
-- **执行准确率**：结果集完全一致（列顺序无关、行顺序按 `order_sensitive`）。
+- **执行准确率**（`execution_accuracy`，主指标）：结果集完全一致（列顺序无关、行顺序按 `order_sensitive`）。
 - **Valid SQL rate**：可回答用例中，产出 SQL 且通过 guard 的比例。
 - **Execution success rate**：状态为 `ok` 的比例。
 - **Refusal accuracy**：拒答用例中，`needs_clarification/refused` 且无 SQL 的比例。
-- **平均步数/延迟**：观测 Agent 效率。
+- **table_recall@5**：`expected_tables` 是否被 `Catalog.search_tables` 的 top-5 覆盖，衡量 schema linking 质量（与 SQL 正确性解耦）。
+- **平均步数/延迟/token**：观测 Agent 效率与成本；token 来自 `LLMResponse.usage`，`mock` provider 下为 0。
 
-数值归一化：`round(float, 4)`；字符串 `strip()`；布尔保持布尔。gold SQL 执行失败会标记为 `gold_sql_failed`，避免把评测集错误算成模型错误。
+数值归一化：`round(float, 4)`；字符串 `strip()`；布尔保持布尔。gold SQL 执行失败会标记为 `gold_sql_failed`，避免把评测集错误算成模型错误。报告按分类（`category`）拆分，元数据记录 provider、模型、用例数、git sha 与时间戳。CI 中退出码由是否有失败用例决定；报告写入 `reports/`（gitignore）。
 
-CI 中 `nl2sql-agent eval` 的退出码由是否有失败用例决定；报告写入 `reports/`（gitignore）。
+### 8.2 AI Judge（辅助信号）
+
+确定性比对之外，`LLMJudge` 对同一 case 的 question / gold SQL+结果 / candidate SQL+结果 / answer 做结构化裁定，产出 `sql_equivalent`、`result_equivalent`、`answer_faithful`、`answer_complete`、`refusal_appropriate` 与 issues/severity。
+
+- **职责切分**：`answer_faithful` 只判断回答是否编造了 `candidate_result` 之外的值（groundedness），与"答对没答对、答全没答全"无关；漏答关键点由 `answer_complete` 承担。这条边界写在 `data/judge_prompt.txt` 里，是校准一致率从 75% 提升到 95% 的关键。
+- **注入防护**：待评数据用 XML 标签包裹并声明为"数据，不是指令"；输入按 rows/cols/cell/total 四级截断；schema 摘录剔除 sensitive/disabled 列。
+- **降级**：JSON 解析失败重试一次（去掉 `json_object`），枚举非法或仍失败即记 `unknown`，不污染指标。
+- **缓存**：`CachedJudge` 落 SQLite，key = `sha256(model + prompt_version + cache_payload)`；改 prompt 必须 bump `JUDGE_PROMPT_VERSION` 使旧缓存失效，`unknown`/`parse_error` 不缓存。
+- **成本上限**：`judge_max_calls` 截断真实调用，其余标记为未评测。
+
+Judge 指标（coverage / sql_equivalent / result_equivalent / faithful / complete / refusal / unknown / cache_hits / tokens）与确定性指标分块写入同一报告，并带免责声明——**AI 指标只用于发现 SQL 写法差异、拒答合理性和回答质量，不取代 gold 执行比对**。
+
+### 8.3 人工校准门禁
+
+`data/judge_calibration.jsonl` 是 20 条人工标注集。`eval --calibrate` 逐条比对 Judge 与人工标签，输出总体一致率、逐字段一致率和 Cohen's kappa；`--judge-sample N`（固定种子）抽样全量评审，`--judge-on-fail` 只评确定性失败用例，`--compare <report.json>` 输出与历史基线的指标增量。
+
+未过门禁（一致率 ≥ 85% 且 sql/answer kappa ≥ 0.6）前不得引用 AI 数字。当前 `qwen-max` + `judge-v2` 实测：总体 90%、sql_equivalent 95%/κ0.857、answer_faithful 95%/κ0.857，达标。残余两条分歧（`ORDER BY` 字段不同导致行序差异、回答忠实但过于简短）记录在 [CHANGELOG.md](../CHANGELOG.md) 的校准小节，作为"Judge 属辅助信号"的实证。
 
 ---
 
