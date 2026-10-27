@@ -152,7 +152,7 @@ def test_candidates_never_reach_retrieval(store: ExperienceStore) -> None:
     store.resolve_failure(item["id"], GOOD_SQL, validator=ok_validator)
     hits = store.search(QUESTION, schema_hash="h1")
     assert len(hits) == 1
-    assert hits[0]["quality"] == "hard"
+    assert hits[0]["quality"] == "verified"
     assert hits[0]["sql"] == GOOD_SQL
 
 

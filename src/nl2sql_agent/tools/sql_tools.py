@@ -2,87 +2,36 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
 from ..guard import SQLGuard
 from ..repair import SQLRepairer
-from ..text import to_jsonable
 from .base import Tool, ToolSpec, string_param
-from .db import connect_readonly
+from .db import Target, query
 
 
 def run_readonly_query(
-    db_path: str | Path,
+    db_path: Target | str | Path,
     sql: str,
     *,
     max_rows: int = 200,
     timeout_ms: int = 5000,
 ) -> dict[str, Any]:
-    max_rows = max(1, min(1000, int(max_rows)))
-    timeout_ms = max(100, int(timeout_ms))
-    started = time.monotonic()
-    deadline = started + timeout_ms / 1000.0
-    conn = None
-    try:
-        conn = connect_readonly(db_path)
-
-        def _progress() -> int:
-            return int(time.monotonic() > deadline)
-
-        conn.set_progress_handler(_progress, 1000)
-        cursor = conn.execute(sql)
-        columns = [desc[0] for desc in (cursor.description or [])]
-        fetched = cursor.fetchmany(max_rows)
-        truncated = cursor.fetchone() is not None
-        rows = [list(row) for row in fetched]
-        return {
-            "success": True,
-            "columns": columns,
-            "rows": to_jsonable(rows),
-            "row_count": len(rows),
-            "truncated": truncated,
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-        }
-    except FileNotFoundError as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_code": "db_not_found",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-        }
-    except sqlite3.OperationalError as exc:
-        error = str(exc)
-        code = "timeout" if "interrupted" in error.lower() else "sql_error"
-        if code == "timeout":
-            error = f"查询超过 {timeout_ms}ms 被中止，请缩小扫描范围或加过滤条件"
-        return {
-            "success": False,
-            "error": error,
-            "error_code": code,
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-        }
-    except sqlite3.Error as exc:
-        return {
-            "success": False,
-            "error": str(exc),
-            "error_code": "sql_error",
-            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-        }
-    finally:
-        if conn is not None:
-            conn.close()
+    """Backend-agnostic read-only execution (see ``tools.db.query``)."""
+    return query(db_path, sql, max_rows=max_rows, timeout_ms=timeout_ms)
 
 
 def build_sql_tools(
     guard: SQLGuard,
     repairer: SQLRepairer,
-    db_path: str | Path,
+    target: Target,
     *,
     max_rows: int = 200,
     timeout_ms: int = 5000,
+    retries: int = 0,
+    retry_backoff_sec: float = 0.05,
 ) -> list[Tool]:
     def validate_sql(sql: str) -> dict[str, Any]:
         return guard.check(str(sql or "")).to_dict()
@@ -99,12 +48,32 @@ def build_sql_tools(
         limit = max_rows
         if max_rows_limit is not None:
             limit = max(1, min(max_rows, int(max_rows_limit)))
-        result = run_readonly_query(
-            db_path,
+        result = query(
+            target,
             check.sql,
             max_rows=limit,
             timeout_ms=timeout_ms,
         )
+        attempts = 1
+        # Only pool exhaustion is retried: the statement itself never ran, the query
+        # is read-only, and the cause is operational. A sql_error is the model's
+        # problem and a timeout only gets slower when repeated.
+        while (
+            attempts <= retries
+            and not result.get("success")
+            and result.get("error_code") == "pool_unavailable"
+        ):
+            if retry_backoff_sec > 0:
+                time.sleep(retry_backoff_sec)
+            result = query(
+                target,
+                check.sql,
+                max_rows=limit,
+                timeout_ms=timeout_ms,
+            )
+            attempts += 1
+        if attempts > 1:
+            result["attempts"] = attempts
         result["sql"] = check.sql
         return result
 

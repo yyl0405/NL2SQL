@@ -6,6 +6,7 @@ from typing import Any
 
 from ..guard import SQLGuard
 from ..memory import ExperienceStore
+from ..recall import ExperienceRecall
 from ..taxonomy import classify_category
 from .base import Tool, ToolError, ToolSpec, string_param
 
@@ -15,22 +16,36 @@ def build_experience_tools(
     schema_hash: str,
     guard: SQLGuard,
     category_boost: float = 0.12,
+    recall: ExperienceRecall | None = None,
 ) -> list[Tool]:
     def search_experience(question: str, top_k: int = 3) -> dict[str, Any]:
         category = classify_category(str(question or ""))
-        examples = store.search(
-            str(question or ""),
-            schema_hash=schema_hash,
-            top_k=max(1, min(10, int(top_k))),
-            category=category,
-            category_boost=category_boost,
-        )
-        return {
+        top_k = max(1, min(10, int(top_k)))
+        if recall is None:
+            examples = store.search(
+                str(question or ""),
+                schema_hash=schema_hash,
+                top_k=top_k,
+                category=category,
+                category_boost=category_boost,
+            )
+        else:
+            examples = recall.search(
+                str(question or ""),
+                schema_hash=schema_hash,
+                top_k=top_k,
+                category=category,
+                category_boost=category_boost,
+            )
+        payload: dict[str, Any] = {
             "count": len(examples),
             "category": category,
             "examples": examples,
             "note": "只返回人工验证过的经验；候选经验不会进入提示词",
         }
+        if recall is not None:
+            payload["recall"] = recall.last.to_dict()
+        return payload
 
     def save_experience(question: str, sql: str, category: str = "") -> dict[str, Any]:
         question = str(question or "").strip()
@@ -41,6 +56,15 @@ def build_experience_tools(
         if not check.valid:
             messages = "; ".join(issue.message for issue in check.errors)
             raise ToolError(f"候选 SQL 未通过护栏，不能写入经验库: {messages}")
+        # The admission gate is the only consumer of counterexamples that runs without a
+        # human in the loop: this exact question/SQL shape already failed once, so saving
+        # it as an example would turn a recorded failure into future few-shot guidance.
+        failed = store.has_counterexample(question, check.sql, schema_hash=schema_hash)
+        if failed is not None and failed.get("status") == "open":
+            raise ToolError(
+                f"该 SQL 已在失败反例队列中（error_code={failed.get('error_code') or 'unknown'}，"
+                f"已发生 {failed.get('occur_count')} 次），不能写为候选经验"
+            )
         record = store.add(
             question,
             check.sql,

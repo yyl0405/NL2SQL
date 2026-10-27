@@ -5,4 +5,4 @@ from .config import Settings
 from .runtime import create_agent
 
 __all__ = ["AgentResult", "NL2SQLAgent", "Settings", "create_agent"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

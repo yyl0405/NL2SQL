@@ -1,0 +1,41 @@
+{"id":"adv_insert","sql":"INSERT INTO sales_order (order_id, region) VALUES ('X1', '华东')","dialect":"sqlite","expect_valid":false,"expect_codes":["write_keyword"],"layer":"regex","why":"写操作必须被拒"}
+{"id":"adv_update","sql":"UPDATE sales_order SET status = 'closed' WHERE order_id = 'SO-1'","dialect":"sqlite","expect_valid":false,"expect_codes":["write_keyword"],"layer":"regex","why":"写操作必须被拒"}
+{"id":"adv_delete","sql":"DELETE FROM material WHERE category = '半成品'","dialect":"sqlite","expect_valid":false,"expect_codes":["write_keyword"],"layer":"regex","why":"写操作必须被拒"}
+{"id":"adv_drop","sql":"DROP TABLE sales_order","dialect":"sqlite","expect_valid":false,"expect_codes":["not_select","write_keyword"],"layer":"regex","why":"DDL 既非查询也含危险关键字"}
+{"id":"adv_stacked","sql":"SELECT o.order_id FROM sales_order o; DROP TABLE material","dialect":"sqlite","expect_valid":false,"expect_codes":["multi_statement","write_keyword"],"layer":"regex","why":"分号拼接第二条是 DDL"}
+{"id":"adv_pragma","sql":"PRAGMA journal_mode = wal","dialect":"sqlite","expect_valid":false,"expect_codes":["write_keyword"],"layer":"regex","why":"PRAGMA 会改连接状态"}
+{"id":"adv_attach","sql":"ATTACH DATABASE 'x.db' AS x","dialect":"sqlite","expect_valid":false,"expect_codes":["not_select","write_keyword"],"layer":"regex","why":"ATTACH 挂载外部库"}
+{"id":"adv_select_star","sql":"SELECT * FROM sales_order","dialect":"sqlite","expect_valid":false,"expect_codes":["select_star"],"layer":"regex","why":"禁止全列投影"}
+{"id":"adv_qualified_star","sql":"SELECT s.* FROM sales_order s","dialect":"sqlite","expect_valid":false,"expect_codes":["select_star"],"layer":"regex","why":"别名限定 .* 同样禁止"}
+{"id":"adv_disabled_table","sql":"SELECT a.audit_id FROM internal_audit a","dialect":"sqlite","expect_valid":false,"expect_codes":["disabled_table"],"layer":"regex","why":"禁用表不可查"}
+{"id":"adv_disabled_column","sql":"SELECT s.internal_note FROM sales_order s","dialect":"sqlite","expect_valid":false,"expect_codes":["disabled_column"],"layer":"regex","why":"禁用字段不可查"}
+{"id":"adv_sensitive_column","sql":"SELECT s.customer_phone FROM sales_order s","dialect":"sqlite","expect_valid":false,"expect_codes":["sensitive_column"],"layer":"regex","why":"敏感字段默认禁止"}
+{"id":"adv_bare_sensitive","sql":"SELECT customer_phone FROM sales_order","dialect":"sqlite","expect_valid":false,"expect_codes":["sensitive_column"],"layer":"regex","why":"未限定字段也要靠词边界扫描拦住"}
+{"id":"adv_nospace_from","sql":"SELECT a.created_at FROM[internal_audit] a","dialect":"sqlite","expect_valid":false,"expect_codes":["disabled_table"],"layer":"ast","why":"FROM 后无空格时正则识别不到表，禁用表会漏网"}
+{"id":"adv_randomblob","sql":"SELECT randomblob(100000000) AS payload FROM material","dialect":"sqlite","expect_valid":false,"expect_codes":["dangerous_function"],"layer":"ast","why":"资源型函数不在关键字黑名单里"}
+{"id":"adv_xp_cmdshell","sql":"SELECT xp_cmdshell('dir') AS out FROM material","dialect":"sqlite","expect_valid":false,"expect_codes":["dangerous_function"],"layer":"ast","why":"不写 EXEC 的危险函数调用"}
+{"id":"adv_select_into","sql":"SELECT o.order_id INTO #tmp FROM sales_order o","dialect":"mssql","expect_valid":false,"expect_codes":["write_keyword"],"layer":"ast","why":"SELECT INTO 落表不含 INSERT 关键字"}
+{"id":"adv_sqlite_master","sql":"SELECT name FROM sqlite_master WHERE type = 'table'","dialect":"sqlite","expect_valid":false,"expect_codes":["metadata_access"],"layer":"ast","why":"查系统表绕过目录，正则会报 unknown_table 但语义不对"}
+{"id":"adv_information_schema","sql":"SELECT TABLE_NAME FROM information_schema.tables","dialect":"mssql","expect_valid":false,"expect_codes":["metadata_access"],"layer":"ast","why":"元数据通道必须显式拒绝"}
+{"id":"adv_exec_delete","sql":"EXEC('DELETE FROM material')","dialect":"mssql","expect_valid":false,"expect_codes":["not_select","write_keyword"],"layer":"regex","why":"写语句藏在 EXEC 字符串里"}
+{"id":"adv_offset_fetch","sql":"SELECT o.order_id FROM sales_order o ORDER BY o.order_id OFFSET 10 ROWS FETCH NEXT 10 ROWS ONLY","dialect":"mssql","expect_valid":false,"expect_codes":["offset_fetch"],"layer":"regex","why":"目标库是 SQL Server 2008 R2"}
+{"id":"adv_nolock_on_sqlite","sql":"SELECT o.order_id FROM sales_order AS o WITH (NOLOCK)","dialect":"sqlite","expect_valid":false,"expect_codes":["table_hint"],"layer":"regex","why":"SQLite 没有表提示"}
+{"id":"adv_updlock","sql":"SELECT o.order_id FROM sales_order AS o WITH (UPDLOCK)","dialect":"mssql","expect_valid":false,"expect_codes":["table_hint"],"layer":"regex","why":"只允许 NOLOCK，UPDLOCK 会加写锁"}
+{"id":"adv_required_filter_missing","sql":"SELECT d.lookup_name FROM dim_lookup d","dialect":"sqlite","expect_valid":false,"expect_codes":["required_filter"],"layer":"regex","why":"维度表必须限定 lookup_type"}
+{"id":"adv_unknown_table","sql":"SELECT x.from_date FROM delivery_plan x","dialect":"sqlite","expect_valid":false,"expect_codes":["unknown_table"],"layer":"regex","why":"目录外的表不允许出现"}
+{"id":"adv_unknown_column","sql":"SELECT s.warehouse_zone FROM sales_order s","dialect":"sqlite","expect_valid":false,"expect_codes":["unknown_column"],"layer":"regex","why":"拼错字段要在执行前拦住"}
+{"id":"adv_join_ghost","sql":"SELECT o.order_id FROM sales_order o JOIN bom_lines b ON b.parent_id = o.order_id","dialect":"sqlite","expect_valid":false,"expect_codes":["unknown_table"],"layer":"regex","why":"JOIN 的表同样要过目录"}
+{"id":"adv_empty","sql":"","dialect":"sqlite","expect_valid":false,"expect_codes":["empty_sql"],"layer":"regex","why":"空 SQL 直接拒"}
+{"id": "adv_backtick_disabled_table", "sql": "SELECT `order_id` FROM `internal_audit` a", "dialect": "sqlite", "expect_valid": false, "expect_codes": ["disabled_table"], "layer": "regex", "why": "反引号包住的禁用表：掩码器以前不去反引号，表引用读成 0 条，规则整层被跳过"}
+{"id": "adv_backtick_sensitive_column", "sql": "SELECT `o`.`customer_phone` FROM `sales_order` AS `o`", "dialect": "sqlite", "expect_valid": false, "expect_codes": ["sensitive_column"], "layer": "regex", "why": "全限定列 + 全引号表名以前同样读不出来，敏感列检查整条跳过"}
+{"id": "adv_backtick_catalog", "sql": "SELECT `t`.`name` FROM `sqlite_master` AS `t`", "dialect": "sqlite", "expect_valid": false, "expect_codes": ["unknown_table"], "layer": "regex", "why": "反引号包系统目录：正则层报 unknown_table（AST 层还会多报 metadata_access）"}
+{"id":"pass_literal_trap","sql":"SELECT o.order_id FROM sales_order o WHERE o.customer_name = 'DROP TABLE material;--'","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"字符串里的关键字不是 SQL，不能误杀"}
+{"id":"pass_comment_keyword","sql":"SELECT /* update sales_order set status='x' */ o.order_id FROM sales_order o","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"注释里的写关键字不是 SQL"}
+{"id":"pass_count_star","sql":"SELECT COUNT(*) AS order_count FROM sales_order","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"COUNT(*) 不是全列投影"}
+{"id":"pass_cte","sql":"WITH open_orders AS (SELECT o.order_id FROM sales_order o WHERE o.status = 'open') SELECT COUNT(open_orders.order_id) AS c FROM open_orders","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"CTE 名不参与目录校验"}
+{"id":"pass_chinese_value","sql":"SELECT o.order_id FROM sales_order o WHERE o.region = '华东' AND o.order_date >= '2026-06-01'","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"中文维度值是正常查询"}
+{"id":"pass_required_filter","sql":"SELECT d.lookup_code FROM dim_lookup d WHERE d.lookup_type = 'material_category'","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"带上了必需过滤条件"}
+{"id":"pass_nolock_mssql","sql":"SELECT o.order_id FROM sales_order AS o WITH (NOLOCK) WHERE o.status = 'open'","dialect":"mssql","expect_valid":true,"expect_codes":[],"layer":"regex","why":"只读 NOLOCK 在 SQL Server 是允许的"}
+{"id":"pass_top_mssql","sql":"SELECT TOP 5 o.order_id FROM sales_order AS o ORDER BY o.order_id","dialect":"mssql","expect_valid":true,"expect_codes":[],"layer":"regex","why":"2008 R2 的分页写法"}
+{"id":"pass_fenced","sql":"```sql\nSELECT o.order_id FROM sales_order o WHERE o.region = '华北'\n```","dialect":"sqlite","expect_valid":true,"expect_codes":[],"layer":"regex","why":"模型常带代码围栏，清洗后要放行"}
+{"id": "pass_backtick_projection", "sql": "SELECT `o`.`order_id`, `o`.`region` FROM `sales_order` AS `o` WHERE `o`.`region` = '华北' ORDER BY `o`.`order_id` LIMIT 5", "dialect": "sqlite", "expect_valid": true, "expect_codes": [], "layer": "regex", "why": "MySQL 风格反引号是合法标识符引用，去引号后不能反过来误杀正确查询"}

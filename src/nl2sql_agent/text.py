@@ -8,6 +8,7 @@ import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Iterable, Sequence
 
 _WORD_RE = re.compile(r"[a-z_][a-z0-9_]*|\d+(?:\.\d+)?")
@@ -41,6 +42,61 @@ def jaccard(left: Iterable[str], right: Iterable[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+def token_union(*texts: str) -> set[str]:
+    """Distinct tokens across several fields: one row's fingerprint for redundancy checks.
+
+    Question and SQL together means a repeat is caught either by wording or by shape —
+    three near-identical phrasings of one query, and the same query written three ways
+    around the same SQL, both collapse to one token set.
+    """
+    tokens: set[str] = set()
+    for text in texts:
+        tokens.update(tokenize(text or ""))
+    return tokens
+
+
+def mmr_select(
+    scores: Sequence[float],
+    token_sets: Sequence[set[str]],
+    *,
+    top_k: int,
+    diversity: float = 0.0,
+) -> list[int]:
+    """Greedy max-marginal-relevance selection, returning indices into ``scores``.
+
+    ``diversity = 0`` reproduces the plain top-k ordering exactly, so a library that
+    never enabled it keeps its previous retrieval. Above 0 each candidate is charged
+    its largest token overlap with what has already been chosen, which is what stops
+    three near-identical phrasings from filling a three-slot few-shot budget. Scores
+    are expected on a 0..1 scale because the relevance and redundancy terms are
+    weighted by ``1-λ`` and ``λ`` directly; ties break on the lower index so the
+    result never depends on set iteration order.
+    """
+    if top_k <= 0 or not scores:
+        return []
+    limit = min(int(top_k), len(scores))
+    if diversity <= 0:
+        return sorted(range(len(scores)), key=lambda i: (-float(scores[i]), i))[:limit]
+    lambda_ = min(1.0, max(0.0, float(diversity)))
+    remaining = set(range(len(scores)))
+    chosen: list[int] = []
+    while remaining and len(chosen) < limit:
+        best: int | None = None
+        best_value = float("-inf")
+        for index in sorted(remaining):
+            redundancy = max(
+                (jaccard(token_sets[index], token_sets[other]) for other in chosen),
+                default=0.0,
+            )
+            value = (1.0 - lambda_) * float(scores[index]) - lambda_ * redundancy
+            if value > best_value:
+                best, best_value = index, value
+        assert best is not None
+        chosen.append(best)
+        remaining.discard(best)
+    return chosen
 
 
 @dataclass
@@ -106,6 +162,11 @@ def to_jsonable(value: Any) -> Any:
     """Convert sqlite / dataclass-ish values into JSON-safe primitives."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, Decimal):
+        # SQL Server DECIMAL must stay numeric: str(Decimal("3754.00")) is
+        # "3754.00" and str(Decimal("3754")) is "3754", which makes two equal
+        # answer sets look different to the evaluator.
+        return float(value)
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     if isinstance(value, dict):

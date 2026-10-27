@@ -1,0 +1,31 @@
+{
+  "kind": "nl2sql-ex-baseline",
+  "generated_at": "2026-10-22T15:54:25+00:00",
+  "provider": "mock",
+  "model": "RuleBasedLLM",
+  "prompt_version": "agent-v4",
+  "git_sha": "c6d3344",
+  "guard": {
+    "ast": "off",
+    "ast_available": true,
+    "fail_closed": false,
+    "principal": null,
+    "allow_sensitive": false
+  },
+  "corpus": {
+    "total": 123,
+    "answerable": 113,
+    "refusals": 10,
+    "clarifications": 0,
+    "skipped": 0
+  },
+  "metrics": {
+    "execution_accuracy": 0.4602,
+    "overall_accuracy": 0.4959,
+    "valid_sql_rate": 0.7788,
+    "execution_success_rate": 0.7788,
+    "refusal_accuracy": 0.9,
+    "clarification_accuracy": 0.0,
+    "table_recall_at_5": 0.94
+  }
+}

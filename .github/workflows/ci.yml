@@ -21,13 +21,29 @@ jobs:
           cache: pip
 
       - name: Install
-        run: python -m pip install -e ".[dev]"
+        # `web` too: without it tests/test_web_api.py import-skips and the whole
+        # console surface merges untested.
+        run: python -m pip install -e ".[dev,web]"
 
       - name: Unit and integration tests
         run: python -m pytest -q
 
-      - name: Offline agent evaluation
-        run: python -m nl2sql_agent.cli eval --home . --report-dir reports
+      - name: Guard benchmark (adversarial / permissions / fan-out / gold false positives)
+        run: |
+          mkdir -p reports
+          python -m nl2sql_agent.cli guard-check --home . --json > reports/guard-check.json
+
+      - name: Offline agent evaluation (v1 baseline subset, gating)
+        run: python -m nl2sql_agent.cli eval --home . --only-tag v1_baseline --report-dir reports
+
+      - name: Offline agent evaluation (full corpus, regression gate)
+        # This corpus is not expected to pass — mock fails 62 of 123 by design, which is
+        # why the step used to be `continue-on-error` and guarded nothing. The gate asks
+        # a different question: did the metrics move more than 2pp against the committed
+        # baseline (benchmarks/ex_baseline.json, aggregate numbers only)?
+        run: >-
+          python -m nl2sql_agent.cli eval --home . --report-dir reports
+          --compare benchmarks/ex_baseline.json --fail-on-regression
 
       - name: Upload evaluation report
         if: always()
@@ -36,3 +52,51 @@ jobs:
           name: eval-report-py${{ matrix.python-version }}
           path: reports/
           if-no-files-found: ignore
+
+  core-only:
+    # The README quick start also documents `pip install -e .`. That path must
+    # degrade the bench and say so, never render an unmeasured AST layer as a
+    # clean 0/0 audit — this job is the regression gate for that honesty.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install without any optional extras
+        run: python -m pip install -e . pytest
+
+      - name: Unit and integration tests
+        run: python -m pytest -q
+
+      - name: Guard benchmark reports the AST layer as unmeasured
+        run: |
+          mkdir -p reports
+          python -m nl2sql_agent.cli guard-check --home . --json > reports/guard-check-no-ast.json
+          python - <<'PY'
+          import json
+          report = json.load(open("reports/guard-check-no-ast.json", encoding="utf-8"))
+          assert report["catalog"]["ast_available"] is False
+          assert report["catalog"]["ast_measured"] is False
+          assert report["gold_sql"]["ast"]["measured"] is False
+          assert report["gold_sql"]["regex"]["measured"] is True
+          # 17 with the parser gone: `FROM[internal_audit]` became regex-visible once the
+          # dialect quoting rule landed, so a 16 here means that rule regressed.
+          assert report["permission"]["blocked"] == 17
+          assert report["adversarial"]["ast_only_blocked"] == []
+          assert report["failures"] == {key: 0 for key in report["failures"]}
+          PY
+
+      - name: Offline agent evaluation (v1 baseline subset, gating)
+        run: python -m nl2sql_agent.cli eval --home . --only-tag v1_baseline
+
+      - name: Offline agent evaluation (full corpus, regression gate)
+        # The same baseline as the main job. Seven gated metrics matched exactly with
+        # sqlglot / httpx / pyodbc hidden, so this also says an accuracy number cannot
+        # quietly start depending on an optional extra.
+        run: >-
+          python -m nl2sql_agent.cli eval --home . --report-dir reports
+          --compare benchmarks/ex_baseline.json --fail-on-regression

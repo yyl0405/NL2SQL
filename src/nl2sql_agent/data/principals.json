@@ -1,0 +1,74 @@
+{
+  "comment": "Synthetic demo principals. A real deployment points NL2SQL_PRINCIPALS at its own file and keeps it out of the repository: role names and column-level rules describe the production schema.",
+  "principals": [
+    {
+      "id": "analyst_full",
+      "display_name": "全量只读分析师",
+      "tables": null,
+      "row_filters": [],
+      "note": "不设任何限制，用于对照：权限关闭时行为与无 principal 完全一致。"
+    },
+    {
+      "id": "rep_east",
+      "display_name": "华东销售",
+      "tables": ["sales_order", "order_item", "shipment"],
+      "exclude_columns": {
+        "sales_order": ["sales_rep", "customer_phone"]
+      },
+      "row_filters": [
+        {
+          "table": "sales_order",
+          "column": "region",
+          "values": ["华东"]
+        }
+      ],
+      "note": "只能看华东订单；提成归属（sales_rep）与客户电话不出现在他的 schema 里，也不会出现在相近字段提示里。"
+    },
+    {
+      "id": "wh_a_keeper",
+      "display_name": "A 仓仓管",
+      "tables": ["inventory", "material", "order_item", "dim_lookup"],
+      "exclude_columns": {
+        "material": ["standard_cost"]
+      },
+      "row_filters": [
+        {
+          "table": "inventory",
+          "column": "warehouse",
+          "values": ["WH-A"]
+        }
+      ],
+      "note": "库存只限本仓；标准成本是财务口径，对仓管不可见。"
+    },
+    {
+      "id": "buyer_transit",
+      "display_name": "采购（在途）",
+      "tables": ["purchase_order", "material", "dim_lookup"],
+      "only_columns": {
+        "purchase_order": ["po_id", "material_id", "supplier_name", "qty", "expected_date", "status"],
+        "material": ["material_id", "material_name", "category", "unit"]
+      },
+      "row_filters": [
+        {
+          "table": "purchase_order",
+          "column": "status",
+          "values": ["in_transit"]
+        }
+      ],
+      "note": "用 only_columns 示范白名单写法：列出允许的列，其余一律不可见。"
+    },
+    {
+      "id": "planner_multi_region",
+      "display_name": "计划员（华东+华南）",
+      "tables": ["sales_order", "order_item", "work_order", "inventory", "material"],
+      "row_filters": [
+        {
+          "table": "sales_order",
+          "column": "region",
+          "values": ["华东", "华南"]
+        }
+      ],
+      "note": "多值行级权限：SQL 必须自带 region = '华东' / region = '华南' / region IN ('华东','华南')，写成三值或漏掉条件都会被拦。"
+    }
+  ]
+}

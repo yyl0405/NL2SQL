@@ -9,6 +9,7 @@ question returns `unknown` rather than the nearest business category.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 UNKNOWN = "unknown"
@@ -36,7 +37,7 @@ SPECIFIC_WEIGHT = 0.8
 
 DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "kitting": ("齐套", "缺料", "欠料", "配套率", "齐货", "备料情况"),
-    "bom": ("bom", "物料清单", "子件", "母件", "层级", "展开", "单机用量", "单台用量"),
+    "bom": ("bom", "物料清单", "子件", "母件", "父项", "层级", "展开", "单机用量", "单台用量"),
     "inventory": ("库存", "在库", "结存", "可用量", "安全库存", "锁定量", "呆滞"),
     "purchase": ("采购", "在途", "到货", "供应商", "请购", "收货", "po"),
     "production": ("工单", "完工", "投产", "在制", "制单", "产线", "工时", "产能"),
@@ -62,6 +63,13 @@ SHAPE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "过期",
     ),
     "metric": ("多少", "总额", "总金额", "金额", "合计", "总量", "数量", "率", "占比", "卖了"),
+}
+
+# Keywords that must not be matched as bare substrings. ``po`` is a table
+# column and 前 hides inside 之前/当前/提前, so both need a bounded pattern.
+PATTERNS: dict[str, re.Pattern[str]] = {
+    "po": re.compile(r"\bpo\b"),
+    "前": re.compile(r"(?<![之以提当目面])前\s*\d"),
 }
 
 # Tie-break order: domain-specific first, then shape. A date qualifier is the
@@ -113,10 +121,8 @@ def classify(question: str) -> Classification:
     ):
         for category, keywords in table.items():
             for keyword in keywords:
-                if keyword == "po":
-                    matched = " po " in f" {text} "
-                else:
-                    matched = keyword in text
+                pattern = PATTERNS.get(keyword)
+                matched = pattern.search(text) if pattern else keyword in text
                 if matched:
                     scores[category] = max(scores.get(category, 0.0), weight)
                     hits.setdefault(category, []).append(keyword)

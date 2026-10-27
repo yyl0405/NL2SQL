@@ -1,0 +1,11 @@
+{"id":"fan_parent_count","sql":"SELECT o.region, COUNT(o.order_id) AS c FROM sales_order o JOIN order_item i ON i.order_id = o.order_id GROUP BY o.region","expect_warn":true,"why":"订单-订单项是 1:N，COUNT(o.order_id) 数的是行数不是订单数"}
+{"id":"fan_parent_sum","sql":"SELECT m.category, SUM(m.safety_stock) AS s FROM material m JOIN order_item i ON i.material_id = m.material_id GROUP BY m.category","expect_warn":true,"why":"物料安全库存按订单项行数放大"}
+{"id":"fan_child_sum_ok","sql":"SELECT o.region, SUM(i.qty * i.unit_price) AS amount FROM sales_order o JOIN order_item i ON i.order_id = o.order_id GROUP BY o.region","expect_warn":false,"why":"聚合的是 N 侧，这是正确粒度，不能报警"}
+{"id":"fan_count_distinct_ok","sql":"SELECT o.region, COUNT(DISTINCT o.order_id) AS c FROM sales_order o JOIN order_item i ON i.order_id = o.order_id GROUP BY o.region","expect_warn":false,"why":"COUNT(DISTINCT) 已经去重，报警就是噪音"}
+{"id":"fan_preaggregated_ok","sql":"SELECT o.order_id, x.total_qty FROM sales_order o JOIN (SELECT i.order_id, SUM(i.qty) AS total_qty FROM order_item i GROUP BY i.order_id) x ON x.order_id = o.order_id","expect_warn":false,"why":"子查询已聚合到父表粒度"}
+{"id":"fan_cross_join","sql":"SELECT o.order_id, m.material_name FROM sales_order o CROSS JOIN material m","expect_warn":true,"why":"笛卡尔积"}
+{"id":"fan_join_without_on","sql":"SELECT o.order_id FROM sales_order o LEFT JOIN order_item i WHERE i.qty > 0","expect_warn":true,"why":"LEFT JOIN 没有 ON，连接条件写在了 WHERE 里"}
+{"id":"fan_comma_from","sql":"SELECT o.order_id, m.material_name FROM sales_order o, material m","expect_warn":true,"why":"逗号并列 FROM 且无 JOIN"}
+{"id":"fan_plain_listing_ok","sql":"SELECT o.order_id, i.qty FROM sales_order o JOIN order_item i ON i.order_id = o.order_id","expect_warn":false,"why":"明细清单按子表粒度展开是预期行为，没有聚合就不该报警"}
+{"id":"fan_multi_join_parent","sql":"SELECT o.region, COUNT(o.order_id) AS c FROM sales_order o JOIN work_order w ON w.order_id = o.order_id JOIN shipment s ON s.order_id = o.order_id GROUP BY o.region","expect_warn":true,"why":"两条 1:N 同时展开，父侧计数被平方级放大"}
+{"id":"fan_mixed_side_ok","sql":"SELECT m.category, ROUND(SUM(i.on_hand_qty * m.standard_cost), 2) AS inventory_value FROM material m JOIN inventory i ON i.material_id = m.material_id GROUP BY m.category","expect_warn":false,"why":"父侧列乘以子侧列再聚合是库存金额的标准算法，报警即噪音"}

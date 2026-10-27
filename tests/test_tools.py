@@ -44,6 +44,28 @@ def test_search_values_returns_dimension_values(runtime: Runtime) -> None:
     assert result["data"]["values"] == ["杭州智造科技有限公司"]
 
 
+def test_search_values_unknown_column_lists_available_columns(runtime: Runtime) -> None:
+    result = _call(
+        runtime,
+        "search_values",
+        {"table": "sales_order", "column": "设备", "query": "机床"},
+    )
+    assert result["ok"] is False
+    assert "可用字段" in result["error"]
+    assert "customer_name" in result["error"]
+
+
+def test_search_values_empty_result_tells_model_to_stop_retrying(runtime: Runtime) -> None:
+    result = _call(
+        runtime,
+        "search_values",
+        {"table": "sales_order", "column": "customer_name", "query": "不存在的客户"},
+    )
+    assert result["ok"] is True
+    assert result["data"]["count"] == 0
+    assert "不要继续" in result["data"]["hint"]
+
+
 def test_search_values_blocks_sensitive_column(runtime: Runtime) -> None:
     result = _call(
         runtime,

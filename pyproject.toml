@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nl2sql-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tool-calling NL2SQL agent for manufacturing ERP analytics, with schema linking, SQL guardrails, deterministic repair and verified experience memory."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,11 @@ dependencies = []
 
 [project.optional-dependencies]
 llm = ["openai>=1.40.0"]
-dev = ["pytest>=8.0"]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
+mssql = ["pyodbc>=5.0"]
+postgres = ["psycopg[binary]>=3.1"]
+ast = ["sqlglot>=25.0"]
+dev = ["pytest>=8.0", "httpx>=0.27", "sqlglot>=25.0"]
 
 [project.scripts]
 nl2sql-agent = "nl2sql_agent.cli:main"
@@ -32,7 +36,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-nl2sql_agent = ["data/*.json", "data/*.jsonl", "data/*.txt"]
+nl2sql_agent = ["data/*.json", "data/*.jsonl", "data/*.txt", "web/static/*.html", "web/static/*.css", "web/static/*.js"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

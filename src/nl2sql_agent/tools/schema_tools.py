@@ -4,23 +4,19 @@ from __future__ import annotations
 
 import difflib
 import re
-from pathlib import Path
 from typing import Any
 
 from ..catalog import Catalog
 from .base import Tool, ToolError, ToolSpec, string_param
-from .db import connect_readonly, quote_ident
+from .db import Target, dialect_sql
+from .db import query as run_query
 
 
-def build_schema_tools(catalog: Catalog, db_path: str | Path) -> list[Tool]:
+def build_schema_tools(catalog: Catalog, target: Target) -> list[Tool]:
     def search_tables(query: str, top_k: int = 5) -> dict[str, Any]:
         top_k = max(1, min(20, int(top_k)))
-        hits = catalog.search_tables(str(query or ""), top_k=top_k)
-        return {
-            "query": query,
-            "count": len(hits),
-            "tables": [hit.to_dict() for hit in hits],
-        }
+        result = catalog.search(str(query or ""), top_k=top_k).to_dict()
+        return {"query": query, **result}
 
     def get_table_schema(tables: list[str] | str | None = None) -> dict[str, Any]:
         if tables is None:
@@ -47,51 +43,57 @@ def build_schema_tools(catalog: Catalog, db_path: str | Path) -> list[Tool]:
             raise ToolError(f"表不存在或已禁用: {table}")
         column_obj = table_obj.column(str(column))
         if column_obj is None or column_obj.disabled:
-            raise ToolError(f"字段不存在或已禁用: {table}.{column}")
+            available = [
+                item.name
+                for item in table_obj.columns
+                if not item.disabled and not item.sensitive
+            ][:20]
+            raise ToolError(
+                f"字段不存在或已禁用: {table}.{column}。可用字段: {', '.join(available)}"
+            )
         if column_obj.sensitive:
             raise ToolError(f"敏感字段不允许做值检索: {table}.{column}")
 
         limit = max(1, min(50, int(limit)))
-        query = str(query or "").strip()
-        sql = (
-            f"SELECT DISTINCT CAST({quote_ident(column_obj.name)} AS TEXT) AS value "
-            f"FROM {quote_ident(table_obj.name)} "
-            f"WHERE {quote_ident(column_obj.name)} IS NOT NULL"
+        query_text = str(query or "").strip()
+        sql, params = dialect_sql(
+            target,
+            table=table_obj.name,
+            column=column_obj.name,
+            limit=200,
+            pattern=query_text or None,
         )
-        params: list[Any] = []
-        if query:
-            sql += f" AND CAST({quote_ident(column_obj.name)} AS TEXT) LIKE ?"
-            params.append(f"%{query}%")
-        sql += " ORDER BY value LIMIT 200"
-        conn = connect_readonly(db_path)
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        finally:
-            conn.close()
-        values = [str(row["value"]) for row in rows]
-        if query:
+        result = run_query(target, sql, params, max_rows=200, timeout_ms=30000)
+        if not result.get("success"):
+            raise ToolError(f"值检索失败: {result.get('error')}")
+        values = [str(row[0]) for row in result["rows"]]
+        if query_text:
             values.sort(
                 key=lambda value: (
-                    -_match_score(query, value),
+                    -_match_score(query_text, value),
                     value,
                 )
             )
         values = values[:limit]
-        return {
+        payload = {
             "table": table_obj.name,
             "column": column_obj.name,
-            "query": query,
+            "query": query_text,
             "count": len(values),
             "values": values,
         }
+        if not values:
+            payload["hint"] = "该列没有匹配值；不要继续对同一列反复试值，改用已确认字段或写入 assumptions。"
+        return payload
 
     return [
         Tool(
             ToolSpec(
                 name="search_tables",
                 description=(
-                    "Retrieve relevant tables from the schema catalog using lexical schema linking. "
-                    "Call this first. It returns table names, descriptions and column names only."
+                    "Retrieve relevant tables from the schema catalog using schema linking "
+                    "(BM25, optionally fused with embedding recall). Call this first. It returns "
+                    "table names, descriptions, column names and the retrieval source per table."
                 ),
                 parameters={
                     "type": "object",
@@ -134,7 +136,9 @@ def build_schema_tools(catalog: Catalog, db_path: str | Path) -> list[Tool]:
                 name="search_values",
                 description=(
                     "Look up real values of a low-cardinality dimension column (customer name, material "
-                    "name, status, region). Use it before filtering on a Chinese value that is not in the schema."
+                    "name, status, region). The column must be an exact name from get_table_schema; unknown "
+                    "columns return the available column list. Use it before filtering on a Chinese value "
+                    "that is not in the schema."
                 ),
                 parameters={
                     "type": "object",

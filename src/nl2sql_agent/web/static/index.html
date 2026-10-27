@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NL2SQL 智能问数控制台</title>
+<meta name="description" content="制造 ERP 自然语言问数 Agent：多轮会话、护栏、确定性评测与经验闭环">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%233fe0c4'/><stop offset='1' stop-color='%236d8cff'/></linearGradient></defs><rect x='1' y='1' width='38' height='38' rx='11' fill='%23060c12'/><circle cx='19.5' cy='18.5' r='9.2' fill='none' stroke='url(%23g)' stroke-width='2.2'/><path d='M15 15.5H24M15 19H22M15 22.5H23' stroke='url(%23g)' stroke-width='1.7' stroke-linecap='round'/><path d='M25.8 25.2L31 30.4' stroke='url(%23g)' stroke-width='2.6' stroke-linecap='round'/><circle cx='30.6' cy='30' r='1.7' fill='%233fe0c4'/></svg>">
+</head>
+<body>
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="logo-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3fe0c4"/>
+      <stop offset="100%" stop-color="#6d8cff"/>
+    </linearGradient>
+    <radialGradient id="logo-bg" cx="28%" cy="18%" r="90%">
+      <stop offset="0%" stop-color="#173d3a"/>
+      <stop offset="55%" stop-color="#0a161c"/>
+      <stop offset="100%" stop-color="#050a0e"/>
+    </radialGradient>
+  </defs>
+  <symbol id="logo-glyph" viewBox="0 0 40 40">
+    <circle cx="19.5" cy="18.5" r="9.6" fill="none" stroke="url(#logo-gradient)" stroke-width="2.5"/>
+    <path d="M14.6 15.3h9.4M14.6 19h7.2M14.6 22.7h8.4" fill="none" stroke="url(#logo-gradient)" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M26 25.4 31.4 30.8" fill="none" stroke="url(#logo-gradient)" stroke-width="2.8" stroke-linecap="round"/>
+    <circle cx="31.5" cy="30.9" r="1.8" fill="#3fe0c4"/>
+    <circle cx="10.8" cy="8.8" r="1.2" fill="#6d8cff"/>
+  </symbol>
+  <symbol id="logo-mark" viewBox="0 0 40 40">
+    <rect x="1.1" y="1.1" width="37.8" height="37.8" rx="11.6" fill="url(#logo-bg)" stroke="url(#logo-gradient)" stroke-width="1.1"/>
+    <circle cx="19.5" cy="18.5" r="9.6" fill="none" stroke="url(#logo-gradient)" stroke-width="2.5"/>
+    <path d="M14.6 15.3h9.4M14.6 19h7.2M14.6 22.7h8.4" fill="none" stroke="url(#logo-gradient)" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M26 25.4 31.4 30.8" fill="none" stroke="url(#logo-gradient)" stroke-width="2.8" stroke-linecap="round"/>
+    <circle cx="31.5" cy="30.9" r="1.8" fill="#3fe0c4"/>
+    <circle cx="10.8" cy="8.8" r="1.2" fill="#6d8cff"/>
+  </symbol>
+</svg>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <div class="brand__mark" aria-hidden="true"><svg viewBox="0 0 40 40"><use href="#logo-mark"/></svg></div>
+      <div class="brand__text">
+        <span class="brand__name">NL2SQL 控制台</span>
+        <span class="brand__sub" id="brand-prompt">agent</span>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <button class="nav__item" data-route="chat" type="button">
+        <svg class="nav__ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 5.5h14v8H9l-4 3v-3H3z"/></svg>
+        <span class="nav__label">多轮问数</span>
+      </button>
+      <button class="nav__item" data-route="eval" type="button">
+        <svg class="nav__ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 16V9M8 16V4M13 16v-6M18 16v-9"/></svg>
+        <span class="nav__label">评测验证</span>
+      </button>
+      <button class="nav__item" data-route="schema" type="button">
+        <svg class="nav__ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><ellipse cx="10" cy="5" rx="6" ry="2.4"/><path d="M4 5v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V5"/><path d="M4 10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4"/></svg>
+        <span class="nav__label">表结构浏览</span>
+      </button>
+      <button class="nav__item" data-route="memory" type="button">
+        <svg class="nav__ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M10 4c-2-1.4-4.2-1.4-6 0v11c1.8-1.4 4-1.4 6 0 2-1.4 4.2-1.4 6 0V4c-1.8-1.4-4-1.4-6 0Z"/><path d="M10 4v11"/></svg>
+        <span class="nav__label">经验与失败</span>
+        <span class="nav__count" id="nav-failures"></span>
+      </button>
+      <button class="nav__item" data-route="cost" type="button">
+        <svg class="nav__ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 16h14"/><path d="M5 16V9M9.5 16V5M14 16v-8"/></svg>
+        <span class="nav__label">成本看板</span>
+      </button>
+    </nav>
+
+    <div class="rail__foot">
+      <div class="meta" id="rail-meta" aria-live="polite">
+        <div class="meta__row"><span class="meta__k">加载运行时…</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar__title">
+        <span class="topbar__h" id="view-title">多轮问数</span>
+      </div>
+      <div class="topbar__spacer"></div>
+      <div class="topbar__tools">
+        <span class="banner" id="status-banner"><i class="banner__dot" id="status-dot"></i><span id="status-text">连接中</span></span>
+        <button class="btn btn--icon" id="btn-theme" type="button" title="切换深浅色" aria-label="切换深浅色主题">
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="10" cy="10" r="4"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6L14 6M6 14l-1.4 1.4"/></svg>
+        </button>
+        <button class="btn btn--icon" id="btn-refresh" type="button" title="重新载入当前页数据" aria-label="重新载入当前页数据">
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M16 10a6 6 0 1 1-2.1-4.6"/><path d="M16 3v4h-4"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="view" id="view" tabindex="-1" aria-live="polite"></section>
+  </main>
+</div>
+
+<div class="toast-host" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="app.js" defer></script>
+</body>
+</html>

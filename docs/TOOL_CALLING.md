@@ -81,7 +81,7 @@
   "type": "function",
   "function": {
     "name": "search_values",
-    "description": "Look up real values of a low-cardinality dimension column.",
+    "description": "Look up real values of a low-cardinality dimension column. The column must be an exact name from get_table_schema.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -96,7 +96,7 @@
 }
 ```
 
-返回按匹配度排序的真实值。敏感字段、禁用字段、禁用表直接 `ok=false`。
+返回按匹配度排序的真实值。敏感字段、禁用字段、禁用表直接 `ok=false`；未知字段的报错会附带该表最多 20 个可用字段，帮助模型一次纠正而不是连续试列。`count=0` 时返回 `hint`，提示模型不要继续对同一列反复试值。
 
 ### 2.4 `validate_sql`
 
@@ -131,7 +131,9 @@
 }
 ```
 
-错误码：`empty_sql`、`sql_too_long`、`not_select`、`multi_statement`、`write_keyword`、`unknown_table`、`disabled_table`、`required_filter`、`select_star`、`unknown_column`、`disabled_column`、`sensitive_column`。
+错误码：`empty_sql`、`sql_too_long`、`not_select`、`multi_statement`、`write_keyword`、`unknown_table`、`disabled_table`、`required_filter`、`select_star`、`unknown_column`、`disabled_column`、`sensitive_column`、`table_hint`、`offset_fetch`。
+
+启用权限（`--principal`）后追加：`permission_table`、`permission_column`、`row_filter_missing`——越权表报的是 `permission_table` 而不是 `unknown_table`，避免用错误消息把权限策略泄露成"这张表不存在"。启用 AST 层（`NL2SQL_AST_GUARD=on`）后追加：`ast_unavailable`、`ast_parse_failed`、`dangerous_function`、`metadata_access`，以及 warning `ast_table_bypass`；这两类 AST error 是 fail-closed，不会退回正则判定。扇出与多表Join 只产 warning：`join_fanout`、`wide_join`。
 
 ### 2.5 `execute_sql`
 
@@ -267,9 +269,10 @@ tool:      {"ok": false, "error": "确定性修复已达上限 2 轮，不再接
 
 ---
 
-## 4. 接入真实模型时的注意事项
+## 4. 接入在线模型时的注意事项
 
 - 本项目使用 OpenAI 兼容的 `chat.completions`；若服务不支持 `tools`，需要在 `OpenAICompatibleLLM` 中降级为 JSON 指令模式。
 - 建议关闭思考模式（如 DashScope 的 `enable_thinking=false`），避免推理 token 吃掉 SQL 输出预算；对应生产经验见 `docs/EXTRACTION.md`。
 - 工具结果必须保持 JSON 可序列化；`to_jsonable` 会处理 Decimal/bytes/None。
 - 模型并行发起多个 tool call 时，Agent 按顺序执行并逐个回灌 observation；有依赖关系的调用不应并行。
+- 开启双通道复核（`--dual-channel`）时会有**第二次不带 `tools` 的 `chat.completions` 调用**：第二通道故意不给工具，否则它会复用主通道已经信任的检索与值对齐结果，"一致"就只能证明同一个循环很稳定。它的返回按 `{"sql": "..."}` 契约解析，且与主通道共用同一个 `execute_sql`（同护栏、同行限、同超时），见 `docs/ARCHITECTURE.md` 的复核小节。

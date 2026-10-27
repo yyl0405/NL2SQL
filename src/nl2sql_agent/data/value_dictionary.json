@@ -1,0 +1,196 @@
+{
+  "version": "demo-1",
+  "notes": [
+    "合成演示库的业务词典：所有取值都来自 src/nl2sql_agent/demo/seed.py 的虚构数据，不含真实客户或供应商。",
+    "kind=status 的 canonical/中文译名逐字抄自 seed.py 的 DIM_LOOKUP（dim_lookup:order_status 等），alias-check 会回库比对，词典与库不一致时报陈旧。",
+    "精工 / 轴承 两个简称被故意同时挂在客户（或物料）与供应商上：这是演示数据里真实存在的多义，用来验证对齐层会澄清而不是猜。"
+  ],
+  "entries": [
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "杭州智造科技有限公司",
+      "aliases": ["杭智", "杭州智造"]
+    },
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "苏州精工自动化有限公司",
+      "aliases": ["苏州精工", "精工"]
+    },
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "深圳未来装备有限公司",
+      "aliases": ["未来装备", "深圳未来"]
+    },
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "广州启航智能有限公司",
+      "aliases": ["启航", "广州启航"]
+    },
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "北京华创机器有限公司",
+      "aliases": ["华创", "北京华创"]
+    },
+    {
+      "kind": "customer",
+      "column": "sales_order.customer_name",
+      "canonical": "天津恒达制造有限公司",
+      "aliases": ["恒达", "天津恒达"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "伺服电机",
+      "aliases": ["伺服", "伺服马达"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "控制器",
+      "aliases": ["电控"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "精密导轨",
+      "aliases": ["导轨"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "轴承",
+      "aliases": ["滚珠轴承"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "线缆",
+      "aliases": ["电缆"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "传感器",
+      "aliases": ["感应器"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "散热风扇",
+      "aliases": ["风扇"]
+    },
+    {
+      "kind": "material",
+      "column": "material.material_name",
+      "canonical": "整机设备",
+      "aliases": ["整机", "成品设备"]
+    },
+    {
+      "kind": "supplier",
+      "column": "purchase_order.supplier_name",
+      "canonical": "上海精工电机",
+      "aliases": ["精工", "上海电机"],
+      "note": "与苏州精工自动化有限公司共用简称“精工”"
+    },
+    {
+      "kind": "supplier",
+      "column": "purchase_order.supplier_name",
+      "canonical": "苏州电子科技",
+      "aliases": ["苏州电子"]
+    },
+    {
+      "kind": "supplier",
+      "column": "purchase_order.supplier_name",
+      "canonical": "无锡精密导轨",
+      "aliases": ["无锡导轨"]
+    },
+    {
+      "kind": "supplier",
+      "column": "purchase_order.supplier_name",
+      "canonical": "宁波轴承集团",
+      "aliases": ["轴承", "宁波轴承"],
+      "note": "与物料轴承共用简称“轴承”"
+    },
+    {
+      "kind": "supplier",
+      "column": "purchase_order.supplier_name",
+      "canonical": "深圳传感技术",
+      "aliases": ["深圳传感"]
+    },
+    {
+      "kind": "region",
+      "column": "sales_order.region",
+      "canonical": "华东",
+      "aliases": ["华东大区", "东区"]
+    },
+    {
+      "kind": "region",
+      "column": "sales_order.region",
+      "canonical": "华南",
+      "aliases": ["华南大区", "南区"]
+    },
+    {
+      "kind": "region",
+      "column": "sales_order.region",
+      "canonical": "华北",
+      "aliases": ["华北大区", "北区"]
+    },
+    {
+      "kind": "status",
+      "column": "sales_order.status",
+      "canonical": "pending",
+      "aliases": ["待发货", "未发货", "待处理"],
+      "note": "dim_lookup:order_status"
+    },
+    {
+      "kind": "status",
+      "column": "sales_order.status",
+      "canonical": "shipped",
+      "aliases": ["已发货"],
+      "note": "dim_lookup:order_status"
+    },
+    {
+      "kind": "status",
+      "column": "sales_order.status",
+      "canonical": "closed",
+      "aliases": ["已结案"],
+      "note": "dim_lookup:order_status"
+    },
+    {
+      "kind": "status",
+      "column": "work_order.status",
+      "canonical": "completed",
+      "aliases": ["已完工"]
+    },
+    {
+      "kind": "status",
+      "column": "work_order.status",
+      "canonical": "in_progress",
+      "aliases": ["进行中", "生产中"]
+    },
+    {
+      "kind": "status",
+      "column": "work_order.status",
+      "canonical": "pending",
+      "aliases": ["未开工"],
+      "note": "工单的 pending 与订单的 pending 是同一字面值、不同含义"
+    },
+    {
+      "kind": "status",
+      "column": "purchase_order.status",
+      "canonical": "in_transit",
+      "aliases": ["在途", "未到货"]
+    },
+    {
+      "kind": "status",
+      "column": "purchase_order.status",
+      "canonical": "received",
+      "aliases": ["已到货"]
+    }
+  ]
+}

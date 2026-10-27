@@ -1,0 +1,20 @@
+{"id": "sales-amount-month", "question": "2026年6月华东地区销售订单总金额是多少？", "expected_tables": ["sales_order", "order_item"]}
+{"id": "sales-region-rank", "question": "2026年6月各地区销售金额排名", "expected_tables": ["sales_order", "order_item"]}
+{"id": "top-customers", "question": "销售额最高的前3个客户是谁？", "expected_tables": ["sales_order", "order_item"]}
+{"id": "undelivered-orders", "question": "截至2026年7月1日仍未发货的订单有哪些？", "expected_tables": ["sales_order", "shipment"]}
+{"id": "low-stock", "question": "库存低于安全库存的物料有哪些？", "expected_tables": ["inventory", "material"]}
+{"id": "purchase-in-transit", "question": "各供应商在途采购数量是多少？", "expected_tables": ["purchase_order", "material"]}
+{"id": "bom-components", "question": "整机设备的BOM所有子件及单台总用量是多少？", "expected_tables": ["bom", "material"]}
+{"id": "work-order-output", "question": "各生产工单的计划产量和完工产量", "expected_tables": ["work_order", "material"]}
+{"id": "order-lines", "question": "订单ORD-1012里买了哪些物料和数量？", "expected_tables": ["order_item", "material"]}
+{"id": "region-order-count", "question": "每个区域的订单数量是多少？", "expected_tables": ["sales_order"]}
+{"id": "shipment-count", "question": "每张订单发货了几次，分别是多少数量？", "expected_tables": ["shipment", "sales_order"]}
+{"id": "purchase-amount", "question": "本月采购金额合计是多少？", "expected_tables": ["purchase_order", "material"]}
+{"id": "material-categories", "question": "物料分类有哪些？", "expected_tables": ["material"]}
+{"id": "warehouse-locked", "question": "各仓库的锁定量是多少？", "expected_tables": ["inventory"]}
+{"id": "work-order-dates", "question": "生产工单的计划开始和计划结束日期", "expected_tables": ["work_order"]}
+{"id": "order-status", "question": "订单状态是已完成的订单有哪些？", "expected_tables": ["sales_order"]}
+{"id": "bom-usage", "question": "BOM中子件的单位用量是多少？", "expected_tables": ["bom"]}
+{"id": "dim-order-status", "question": "字典里订单状态有哪些取值？", "expected_tables": ["dim_lookup"]}
+{"id": "top-discount", "question": "折扣最高的订单行", "expected_tables": ["order_item"]}
+{"id": "stock-gap", "question": "安全库存与现有量的差额", "expected_tables": ["material", "inventory"]}

@@ -33,6 +33,45 @@ class ChatModel(Protocol):
         ...
 
 
+def usage_tokens(usage: dict[str, int] | None) -> int:
+    """Total tokens from a provider usage block, tolerant of missing fields."""
+    if not usage:
+        return 0
+    total = usage.get("total_tokens")
+    if total is None:
+        total = int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+    try:
+        return max(0, int(total))
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_breakdown(usage: dict[str, int] | None) -> dict[str, int]:
+    """Prompt/completion/cached split; absent fields stay 0 instead of guessed.
+
+    DashScope and OpenAI both report cached prefix tokens in
+    ``prompt_tokens_details.cached_tokens``; DeepSeek uses
+    ``prompt_cache_hit_tokens``. The client folds both spellings into
+    ``cached_tokens`` while parsing the raw response.
+    """
+    usage = usage or {}
+
+    def _int(key: str) -> int:
+        try:
+            return max(0, int(usage.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    prompt = _int("prompt_tokens")
+    completion = _int("completion_tokens")
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "cached_tokens": min(_int("cached_tokens"), prompt) if prompt else _int("cached_tokens"),
+        "total_tokens": usage_tokens(usage),
+    }
+
+
 class OpenAICompatibleLLM:
     """Works with DashScope, DeepSeek, vLLM, Ollama and other compatible APIs."""
 
@@ -90,6 +129,12 @@ class OpenAICompatibleLLM:
             value = getattr(usage_obj, key, None) if usage_obj is not None else None
             if value is not None:
                 usage[key] = int(value)
+        details = getattr(usage_obj, "prompt_tokens_details", None) if usage_obj is not None else None
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
+        if cached is None and usage_obj is not None:
+            cached = getattr(usage_obj, "prompt_cache_hit_tokens", None)
+        if cached is not None:
+            usage["cached_tokens"] = int(cached)
         return LLMResponse(
             content=message.content or "",
             tool_calls=tool_calls,
